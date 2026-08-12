@@ -1,0 +1,55 @@
+{
+  "manifest": {
+    "datasetId": "territorykit-fixture",
+    "datasetVersion": "0.1.0",
+    "schemaVersion": "territory-schema@1",
+    "sourceDate": "2026-07",
+    "geometryHash": "fixture-v1",
+    "license": "CC0-1.0",
+    "name": "TerritoryKit Fixture"
+  },
+  "zones": [
+    {
+      "id": "tr:34",
+      "datasetId": "territorykit-fixture",
+      "level": 2,
+      "childIds": ["tr:34:fatih", "tr:34:besiktas"],
+      "neighborIds": [],
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[28.9, 41.0], [29.1, 41.0], [29.1, 41.1], [28.9, 41.1], [28.9, 41.0]]]
+      },
+      "center": [29.0, 41.05],
+      "bbox": [28.9, 41.0, 29.1, 41.1],
+      "properties": { "name": "Istanbul" }
+    },
+    {
+      "id": "tr:34:fatih",
+      "datasetId": "territorykit-fixture",
+      "level": 3,
+      "childIds": [],
+      "neighborIds": ["tr:34:besiktas"],
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[28.9, 41.0], [29.0, 41.0], [29.0, 41.1], [28.9, 41.1], [28.9, 41.0]]]
+      },
+      "center": [28.95, 41.05],
+      "bbox": [28.9, 41.0, 29.0, 41.1],
+      "properties": { "name": "Fatih" }
+    },
+    {
+      "id": "tr:34:besiktas",
+      "datasetId": "territorykit-fixture",
+      "level": 3,
+      "childIds": [],
+      "neighborIds": ["tr:34:fatih"],
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[29.0, 41.0], [29.1, 41.0], [29.1, 41.1], [29.0, 41.1], [29.0, 41.0]]]
+      },
+      "center": [29.05, 41.05],
+      "bbox": [29.0, 41.0, 29.1, 41.1],
+      "properties": { "name": "Besiktas" }
+    }
+  ]
+}
