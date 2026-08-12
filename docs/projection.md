@@ -1,8 +1,13 @@
 # Koordinat dönüşümü
 
-`float32` hassasiyeti ile enlem/boylam derecelerini doğrudan kullanmak kabul edilemez:
-Türkiye ölçeğinde (10°'lik boylam aralığı) bu, metrelerce hataya yol açar. Bu yüzden dönüşüm
-zorunludur.
+`float32` hassasiyeti ile enlem/boylam derecelerini doğrudan kullanmak kabul edilemez.
+Türkiye enlemlerinde (`lat≈36-42°`) bir `float32` ULP (en küçük temsil edilebilir adım)
+dereceler için ~0.4 m'ye, Web Mercator metrelerinde ise ~0.5 m'ye karşılık gelir — yani bu
+tek başına "metrelerce hata" değil, sub-metre bir kuantalama sorunudur. Asıl risk, bu
+kuantalamanın Unity'nin transform ve derinlik (depth) matematiğinde büyük mutlak
+koordinatlarla (Mercator'da milyonlarca metre) birikmesi ve pratikte gözle görülür jitter'a
+dönüşmesidir. Origin çıkarma, mutlak değerleri küçük tutarak bu birikimi engeller — bu yüzden
+dönüşüm zorunludur.
 
 ## Akış
 
@@ -39,6 +44,12 @@ local_y = (y_merc - origin_y_merc) * scale
 enlemine göre yerel olarak düzeltir — böylece origin çevresinde metre birimleri gerçek yer
 mesafesine yakın kalır.
 
+**Bu bir yaklaşıklıktır, dataset geneli için değil.** Ölçek sadece origin enleminde tam
+doğrudur; dataset origin'den uzaklaştıkça (enlemde) sapar. Türkiye `lat≈36-42°` aralığında
+`cos(36°)=0.809` ve `cos(42°)=0.743` arasında yaklaşık **%8** fark vardır — yani tek bir
+dataset'in kuzey ve güney uçlarında yerel metre ölçeği bu oranda kayabilir. Faz 1'de bu
+sapmayı ölçen bir test eklenecektir (bkz. Faz 1 planı: "ölçek hatası ölçen test").
+
 ## Sayısal örnek
 
 Origin: Ankara, `lon=32.8597`, `lat=39.9334`
@@ -62,5 +73,8 @@ lon = degrees(x_merc / R)
 lat = degrees(2 * atan(exp(y_merc / R)) - pi/2)
 ```
 
-`services/geometry-api/src/geometry_api/projection.py` her iki yönü de uygular ve
-`docs/mesh-format.md`'deki hassasiyet testleriyle (< 1 metre hata) doğrulanır.
+## Durum
+
+Bu dönüşüm henüz uygulanmamıştır. `services/geometry-api/src/geometry_api/projection.py`
+şu an boş bir yer tutucudur; her iki yön (ileri/ters) ve < 1 metre hassasiyet testi ile
+ölçek sapması testi **Faz 1'de** eklenecektir.
