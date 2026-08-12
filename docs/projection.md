@@ -45,10 +45,24 @@ enlemine göre yerel olarak düzeltir — böylece origin çevresinde metre biri
 mesafesine yakın kalır.
 
 **Bu bir yaklaşıklıktır, dataset geneli için değil.** Ölçek sadece origin enleminde tam
-doğrudur; dataset origin'den uzaklaştıkça (enlemde) sapar. Türkiye `lat≈36-42°` aralığında
-`cos(36°)=0.809` ve `cos(42°)=0.743` arasında yaklaşık **%8** fark vardır — yani tek bir
-dataset'in kuzey ve güney uçlarında yerel metre ölçeği bu oranda kayabilir. Faz 1'de bu
-sapmayı ölçen bir test eklenecektir (bkz. Faz 1 planı: "ölçek hatası ölçen test").
+doğrudur; origin'den enlemde uzaklaştıkça sapar. Sapma oranı `cos(originLat) / cos(lat)`'tır.
+
+İki farklı sayıyı karıştırmamak gerekir:
+
+| Ölçüm | Değer |
+|---|---|
+| Uçtan uca **yayılım** (`cos(36°)/cos(42°)`) | ~%9 |
+| Örnek dataset'te origin'e göre **sapma** (origin `lat=38,956°`, bbox `35,808°–42,105°`) | güneyde **−%4,11**, kuzeyde **+%4,81** |
+
+Yani 500 km'lik bir kuzey-güney mesafesi, dataset uçlarında gerçek yer mesafesinden ~%4-5
+sapar. Şekiller bozulmaz — Mercator konformdur, sapma her iki eksende aynıdır — sadece ölçek
+kayar. Bu, sınır çizimi ve göreli konum için kabul edilebilir; **gerçek mesafe/alan ölçümü için
+kullanılamaz**.
+
+Bu sayılar tahmin değil, ölçüm: `tests/test_projection.py::test_scale_error_across_dataset_bbox`
+haversine ile hesaplanmış gerçek yer mesafesine karşı ölçüyor ve `0,03 < hata < 0,06` bandını
+iddia ediyor. Band bilinçli olarak iki taraflı: biri eşit-alanlı bir projeksiyona geçerse alt
+sınır kırılır ve karar bilinçli alınmak zorunda kalır.
 
 ## Sayısal örnek
 
@@ -73,8 +87,20 @@ lon = degrees(x_merc / R)
 lat = degrees(2 * atan(exp(y_merc / R)) - pi/2)
 ```
 
+## Origin nasıl seçilir
+
+Origin **hesaplanır, yapılandırılmaz**: dataset'teki tüm bölgelerin birleşik bbox'ının
+merkezidir. Aynı girdi her zaman aynı yerel uzayı verir — Faz 3'ün içerik-adresli cache'i buna
+dayanır. Örnek dataset için `originLon=35,2416`, `originLat=38,9562`, `scale=0,777626`.
+
 ## Durum
 
-Bu dönüşüm henüz uygulanmamıştır. `services/geometry-api/src/geometry_api/projection.py`
-şu an boş bir yer tutucudur; her iki yön (ileri/ters) ve < 1 metre hassasiyet testi ile
-ölçek sapması testi **Faz 1'de** eklenecektir.
+Uygulandı — `services/geometry-api/src/geometry_api/projection.py`. Ölçülen değerler:
+
+| Kontrol | Sonuç |
+|---|---|
+| İleri→ters gidiş-dönüş (81 il centroid'i + bbox köşesi, 405 nokta) | en kötü hata **< 1e-6 m** (sözleşme: < 1 m) |
+| Ölçek sapması (bbox boyunca) | **−%4,11 … +%4,81**, origin enleminde < 1e-9 |
+| Konformluk (D-B ve K-G eksenlerinde sapma farkı) | < 1e-4 |
+
+Yukarıdaki sayısal örnek de testtir: `test_matches_the_worked_example_in_docs_projection_md`.

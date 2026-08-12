@@ -57,6 +57,28 @@ mesh'tir ve reddedilmelidir.
   **yok sayar** (ignore), reddetmez. Bu, gelecekteki v1-uyumlu uzantılar için esneklik
   bırakır — yeni davranış gerektiren değişiklikler `version` alanını artırmalıdır.
 
+## Uygulama ve doğrulama
+
+Referans uygulama: `services/geometry-api/src/geometry_api/encoding.py`
+(`encode_tkms` / `decode_tkms`). Yukarıdaki her kural en az bir yönde teste bağlıdır —
+`services/geometry-api/tests/test_encoding.py`.
+
+Encoder tarafındaki iki karar:
+
+- **Sarım yönü üçgen başına hesaplanır.** İşaretli alanı pozitif (CCW) çıkan her üçgende iki
+  index takas edilir. Kör çevirme yapılmaz; earcut'ın çıktısı bugün tekdüze CCW olsa da, bu
+  değiştiği gün kör çevirme tüm yüzleri sessizce ters çevirirdi.
+- **`flags` bit0 çağıran tarafından verilmez**, `vertexCount > 65535` koşulundan türetilir —
+  unutulması mümkün değil.
+
+Sarım garantisi mesh'in **kendi XY uzayı** içindir. Unity'nin `(x, y)`'yi hangi eksenlere
+yerleştirdiği ön yüzün ekranda doğru görünüp görünmediğini belirler; bu Faz 4'ün konusudur ve
+sözleşme burada sabitlendiği için orada değişecek olan yerleştirme, formattır değil.
+
+Ayrıca vertex'ler üçgenlemeden **önce** float32 ızgarasına yuvarlanır (bkz. `triangulate.py`):
+float64'te üçgenleyip sonradan cast etmek, cast sırasında sıfır alana çöken — ve dolayısıyla
+yönlendirilemeyen — üçgenler üretiyordu (ölçüm: 364.057 üçgenin 62'si, 16 ilde).
+
 ## TKMB — Mesh Batch konteyneri (Faz 3'te kullanılır)
 
 `POST /datasets/{id}/mesh/batch` birden çok TKMS mesh'ini tek yanıtta döner. Format Faz 3'te
