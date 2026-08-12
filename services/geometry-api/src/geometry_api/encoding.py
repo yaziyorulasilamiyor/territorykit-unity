@@ -104,8 +104,19 @@ def encode_tkms(vertices: NDArray[np.floating], indices: NDArray[np.integer]) ->
     return header + vertex_array.astype("<f4").tobytes() + index_array.astype(index_dtype).tobytes()
 
 
-def decode_tkms(payload: bytes) -> DecodedMesh:
-    """Decode a TKMS v1 payload, rejecting everything docs/mesh-format.md calls invalid."""
+def decode_tkms(payload: bytes, strict: bool = False) -> DecodedMesh:
+    """Decode a TKMS v1 payload.
+
+    By default this checks everything that makes a payload *unreadable or dangerous to trust*:
+    magic, version, declared length, index alignment and range, non-finite coordinates, the
+    uint32 flag, and the bounding box. The bbox is checked hard — finite, correctly ordered, and
+    equal to the real extent of the decoded vertices — because Phase 3 and Phase 5 cull with it,
+    and a wrong box makes a region silently disappear from the screen rather than look wrong.
+
+    ``strict=True`` additionally checks the two rules that make a mesh *render* correctly:
+    clockwise winding and no zero-area triangles. These are the encoder's contract, so the
+    default reader does not pay for them on every mesh; build pipelines and tests should.
+    """
     if len(payload) < HEADER_SIZE:
         raise MeshFormatError(f"payload is {len(payload)} bytes, shorter than the 32-byte header")
 
@@ -154,6 +165,10 @@ def decode_tkms(payload: bytes) -> DecodedMesh:
             f"index {int(indices.max())} is out of range for {vertex_count} vertices"
         )
 
+    _validate_header_bbox((min_x, min_y, max_x, max_y), vertices)
+    if strict:
+        _validate_render_rules(vertices, indices)
+
     return DecodedMesh(
         vertices=vertices,
         indices=indices,
@@ -162,6 +177,46 @@ def decode_tkms(payload: bytes) -> DecodedMesh:
         version=int(version),
         bytes_consumed=expected_length,
     )
+
+
+def _validate_header_bbox(
+    bbox: tuple[float, float, float, float], vertices: NDArray[np.float32]
+) -> None:
+    if not all(np.isfinite(value) for value in bbox):
+        raise MeshFormatError(f"header bbox contains NaN or infinity: {bbox}")
+    min_x, min_y, max_x, max_y = bbox
+    if min_x > max_x or min_y > max_y:
+        raise MeshFormatError(
+            f"header bbox is inverted: min ({min_x}, {min_y}) is past max ({max_x}, {max_y})"
+        )
+
+    actual = (
+        float(vertices[:, 0].min()),
+        float(vertices[:, 1].min()),
+        float(vertices[:, 0].max()),
+        float(vertices[:, 1].max()),
+    )
+    if bbox != actual:
+        raise MeshFormatError(
+            f"header bbox {bbox} does not match the decoded vertices {actual}; a bbox that lies "
+            "makes the region vanish from viewport culling instead of merely looking wrong"
+        )
+
+
+def _validate_render_rules(vertices: NDArray[np.float32], indices: NDArray[np.uint32]) -> None:
+    """The strict-mode checks: the rules that decide whether a valid payload renders correctly."""
+    corners = vertices.astype(np.float64)[indices.reshape(-1, 3)]
+    a, b, c = corners[:, 0], corners[:, 1], corners[:, 2]
+    cross = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])
+
+    degenerate = int(np.count_nonzero(cross == 0.0))
+    if degenerate:
+        raise MeshFormatError(f"{degenerate} triangle(s) have zero area")
+    counter_clockwise = int(np.count_nonzero(cross > 0.0))
+    if counter_clockwise:
+        raise MeshFormatError(
+            f"{counter_clockwise} triangle(s) wind counter-clockwise; TKMS requires clockwise"
+        )
 
 
 def _validate_vertices(vertices: NDArray[np.floating]) -> NDArray[np.float32]:
@@ -178,19 +233,29 @@ def _validate_vertices(vertices: NDArray[np.floating]) -> NDArray[np.float32]:
 
 
 def _validate_indices(indices: NDArray[np.integer], vertex_count: int) -> NDArray[np.uint32]:
+    """Validate before casting, never after.
+
+    ``astype(np.uint32)`` is a silent reinterpretation: 0.9 becomes 0 and 2**32 becomes 0, and
+    both then encode as a perfectly valid TKMS payload pointing at the wrong vertex. So the dtype
+    and the range are checked while the values are still what the caller passed.
+    """
     array = np.asarray(indices).reshape(-1)
+    if not np.issubdtype(array.dtype, np.integer):
+        raise MeshFormatError(
+            f"indices must be an integer array, got dtype {array.dtype}; a float index cannot be "
+            "rounded silently"
+        )
     if array.size == 0:
         raise MeshFormatError("empty geometry: a mesh must carry at least one triangle")
     if array.size % 3 != 0:
         raise MeshFormatError(f"indexCount {array.size} is not a multiple of 3")
-    if np.any(array < 0):
-        raise MeshFormatError("negative vertex index")
-    array = array.astype(np.uint32)
+    if int(array.min()) < 0:
+        raise MeshFormatError(f"negative vertex index {int(array.min())}")
     if int(array.max()) >= vertex_count:
         raise MeshFormatError(
             f"index {int(array.max())} is out of range for {vertex_count} vertices"
         )
-    return array
+    return array.astype(np.uint32)
 
 
 def _to_clockwise(vertices: NDArray[np.float32], indices: NDArray[np.uint32]) -> NDArray[np.uint32]:

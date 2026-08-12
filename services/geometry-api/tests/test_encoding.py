@@ -323,6 +323,104 @@ def test_decode_rejects_an_index_past_the_vertex_count(hole_mesh: MeshCase) -> N
         decode_tkms(patched)
 
 
+def _raw_payload(
+    vertices: np.ndarray,
+    indices: np.ndarray,
+    *,
+    flags: int = 0,
+    bbox: tuple[float, float, float, float] | None = None,
+    magic: bytes = MAGIC,
+    version: int = VERSION,
+) -> bytes:
+    """Build a payload without going through the encoder, to craft cases it would never emit."""
+    vertex_array = np.asarray(vertices, dtype="<f4")
+    index_array = np.asarray(indices, dtype="<u4" if flags & FLAG_UINT32_INDICES else "<u2")
+    if bbox is None:
+        bbox = (
+            float(vertex_array[:, 0].min()),
+            float(vertex_array[:, 1].min()),
+            float(vertex_array[:, 0].max()),
+            float(vertex_array[:, 1].max()),
+        )
+    header = HEADER_STRUCT.pack(magic, version, flags, len(vertex_array), len(index_array), *bbox)
+    return header + vertex_array.tobytes() + index_array.tobytes()
+
+
+_CLOCKWISE_SQUARE = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=np.float32)
+
+
+# --- encoder: values must be validated before the cast, not after --------------------------
+
+
+def test_encode_rejects_float_indices() -> None:
+    """astype(uint32) would turn 0.9 into 0 and encode a perfectly valid mesh pointing at it."""
+    vertices, _ = _strip_mesh(8)
+    with pytest.raises(MeshFormatError, match="integer array"):
+        encode_tkms(vertices, np.array([0.0, 1.0, 2.9]))
+
+
+def test_encode_rejects_indices_that_overflow_uint32() -> None:
+    vertices, _ = _strip_mesh(8)
+    with pytest.raises(MeshFormatError, match="out of range"):
+        encode_tkms(vertices, np.array([0, 1, 2**32], dtype=np.int64))
+
+
+def test_encode_rejects_negative_indices() -> None:
+    vertices, _ = _strip_mesh(8)
+    with pytest.raises(MeshFormatError, match="negative vertex index"):
+        encode_tkms(vertices, np.array([0, 1, -1], dtype=np.int64))
+
+
+# --- decoder: the bbox is load-bearing, so it is checked hard -------------------------------
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_decode_rejects_non_finite_header_bbox(bad_value: float) -> None:
+    payload = _raw_payload(_CLOCKWISE_SQUARE, [0, 2, 1], bbox=(bad_value, 0.0, 1.0, 1.0))
+    with pytest.raises(MeshFormatError, match="bbox contains NaN or infinity"):
+        decode_tkms(payload)
+
+
+def test_decode_rejects_inverted_header_bbox() -> None:
+    payload = _raw_payload(_CLOCKWISE_SQUARE, [0, 2, 1], bbox=(1.0, 1.0, 0.0, 0.0))
+    with pytest.raises(MeshFormatError, match="bbox is inverted"):
+        decode_tkms(payload)
+
+
+def test_decode_rejects_a_bbox_that_does_not_cover_the_vertices() -> None:
+    """Viewport culling trusts this box; a wrong one makes a region vanish, not look wrong."""
+    payload = _raw_payload(_CLOCKWISE_SQUARE, [0, 2, 1], bbox=(0.0, 0.0, 0.5, 0.5))
+    with pytest.raises(MeshFormatError, match="does not match the decoded vertices"):
+        decode_tkms(payload)
+
+
+# --- decoder: strict mode covers the render rules -------------------------------------------
+
+
+def test_strict_mode_rejects_counter_clockwise_triangles() -> None:
+    payload = _raw_payload(_CLOCKWISE_SQUARE, [0, 1, 2])
+    assert decode_tkms(payload).triangle_count == 1, "readable, so the default reader accepts it"
+    with pytest.raises(MeshFormatError, match="counter-clockwise"):
+        decode_tkms(payload, strict=True)
+
+
+def test_strict_mode_rejects_zero_area_triangles() -> None:
+    collinear = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=np.float32)
+    payload = _raw_payload(collinear, [0, 1, 2])
+    decode_tkms(payload)
+    with pytest.raises(MeshFormatError, match="zero area"):
+        decode_tkms(payload, strict=True)
+
+
+def test_strict_mode_accepts_everything_the_encoder_produces(
+    sample_meshes: list[MeshCase], hole_mesh: MeshCase
+) -> None:
+    for case in [hole_mesh, *sample_meshes]:
+        payload = encode_tkms(case.mesh.vertices, case.mesh.indices)
+        decoded = decode_tkms(payload, strict=True)
+        assert decoded.vertex_count == case.mesh.vertex_count, case.name
+
+
 def test_decode_rejects_empty_geometry() -> None:
     with pytest.raises(MeshFormatError, match="at least one triangle"):
         decode_tkms(_header_only(index_count=0))
