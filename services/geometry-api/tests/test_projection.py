@@ -67,12 +67,9 @@ def test_mercator_inverse_is_exact_for_a_grid() -> None:
     assert np.allclose(back_lat, lats, atol=1e-10)
 
 
-def test_roundtrip_precision_under_one_meter(sample_dataset: Dataset) -> None:
-    """Every province centroid and bbox corner survives project -> unproject within 1 m."""
-    origin = Origin(lon=sample_dataset.origin_lon, lat=sample_dataset.origin_lat)
-
+def _probe_points(dataset: Dataset) -> np.ndarray:
     probes: list[tuple[float, float]] = []
-    for territory in sample_dataset:
+    for territory in dataset:
         min_lon, min_lat, max_lon, max_lat = territory.geometry.bounds
         centroid = territory.geometry.centroid
         probes.extend(
@@ -84,17 +81,49 @@ def test_roundtrip_precision_under_one_meter(sample_dataset: Dataset) -> None:
                 (max_lon, max_lat),
             ]
         )
+    return np.array(probes, dtype=np.float64)
 
-    source = np.array(probes, dtype=np.float64)
+
+def test_roundtrip_precision_under_one_meter(sample_dataset: Dataset) -> None:
+    """The contract measured on the real path: project -> **float32** -> unproject.
+
+    float32 is what TKMS stores, so a round-trip that stays in float64 measures only that the
+    two formulas invert each other. Including the cast is what makes the number mean anything
+    to a Unity client reading a mesh back.
+    """
+    origin = Origin(lon=sample_dataset.origin_lon, lat=sample_dataset.origin_lat)
+    source = _probe_points(sample_dataset)
+
+    stored = project_coords(source, origin).astype(np.float32).astype(np.float64)
+    roundtripped = unproject_coords(stored, origin)
+    errors = np.array(
+        [
+            _haversine_m(lon, lat, back_lon, back_lat)
+            for (lon, lat), (back_lon, back_lat) in zip(source, roundtripped, strict=True)
+        ]
+    )
+
+    assert len(errors) == 81 * 5
+    assert errors.max() < 1.0, f"worst round-trip error {errors.max():.4f} m"
+    # The quantization floor: a float32 step is a few centimetres at Turkey's distances from
+    # the origin. Two-sided, so a change that improves *or* degrades this is noticed.
+    assert 0.01 < errors.max() < 0.1, f"expected centimetre-scale, measured {errors.max():.4f} m"
+    assert float(np.percentile(errors, 95)) < 0.05
+
+
+def test_float64_roundtrip_is_exact_which_is_why_the_cast_must_be_measured(
+    sample_dataset: Dataset,
+) -> None:
+    """Without the float32 cast the error is ~1e-9 m — the formulas, not the pipeline."""
+    origin = Origin(lon=sample_dataset.origin_lon, lat=sample_dataset.origin_lat)
+    source = _probe_points(sample_dataset)
+
     roundtripped = unproject_coords(project_coords(source, origin), origin)
     errors = [
         _haversine_m(lon, lat, back_lon, back_lat)
         for (lon, lat), (back_lon, back_lat) in zip(source, roundtripped, strict=True)
     ]
-
-    assert len(errors) == 81 * 5
-    assert max(errors) < 1.0, f"worst round-trip error {max(errors)} m"
-    assert max(errors) < 1e-6, "float64 round-trip should be far below the 1 m contract"
+    assert max(errors) < 1e-6
 
 
 def test_scale_error_across_dataset_bbox(sample_dataset: Dataset) -> None:
