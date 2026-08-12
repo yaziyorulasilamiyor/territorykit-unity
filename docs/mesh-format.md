@@ -41,6 +41,12 @@ Okuyucu, aldığı byte dizisinin uzunluğunu bu formülle karşılaştırmalıd
 onu yok sayar (ör. hizalama dolgusu); ancak dizide bu formülden **az** byte varsa geçersiz
 mesh'tir ve reddedilmelidir.
 
+Bu hoşgörü **okuyucu içindir, yazıcı için değil.** `decode_tkms`, kullandığı byte sayısını
+`bytes_consumed` alanıyla döndürür; böylece çağıran dolguyu yükten ayırt edebilir. Bu projenin
+kendi çıktısında dolgu **yoktur** ve bu bir testle sabitlenmiştir: build CLI'ın ürettiği 81
+dosyanın her birinde `bytes_consumed == len(dosya)`
+(`tests/test_build.py::test_written_meshes_carry_no_trailing_bytes`).
+
 ## Kurallar
 
 - `vertexCount > 65535` ise `flags` bit0 = 1 olmak **zorunda** (Unity `IndexFormat.UInt32` limiti).
