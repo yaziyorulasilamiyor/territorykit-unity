@@ -104,6 +104,21 @@ def test_payload_length_matches_the_documented_formula(hole_mesh: MeshCase) -> N
     )
 
 
+def test_encoder_writes_exactly_the_declared_length(hole_mesh: MeshCase) -> None:
+    payload = encode_tkms(hole_mesh.mesh.vertices, hole_mesh.mesh.indices)
+    assert decode_tkms(payload).bytes_consumed == len(payload)
+
+
+def test_bytes_consumed_excludes_trailing_padding(hole_mesh: MeshCase) -> None:
+    """The decoder tolerates padding; ``bytes_consumed`` is how a caller tells it apart."""
+    payload = encode_tkms(hole_mesh.mesh.vertices, hole_mesh.mesh.indices)
+    padded = payload + b"\x00\x00\x00\x00"
+    decoded = decode_tkms(padded)
+
+    assert decoded.bytes_consumed == len(payload)
+    assert decoded.bytes_consumed < len(padded)
+
+
 def test_header_bbox_matches_the_stored_vertices(sample_meshes: list[MeshCase]) -> None:
     for case in sample_meshes:
         decoded = decode_tkms(encode_tkms(case.mesh.vertices, case.mesh.indices))

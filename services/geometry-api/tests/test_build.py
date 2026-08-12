@@ -78,6 +78,21 @@ def test_every_written_mesh_decodes_and_matches_its_manifest_entry(
         assert decoded.bbox == pytest.approx(tuple(entry["bboxLocal"])), entry["name"]
 
 
+def test_written_meshes_carry_no_trailing_bytes(sample_dataset: Dataset, tmp_path: Path) -> None:
+    """The decoder tolerates padding. Our own pipeline must never produce any.
+
+    Leniency in the reader is for other people's encoders; a stray byte in a file we wrote
+    would mean the length maths drifted from the format.
+    """
+    assert main(["--input", str(SAMPLE_DATASET_PATH), "--output", str(tmp_path), "--quiet"]) == 0
+
+    files = sorted(tmp_path.glob("*.tkms"))
+    assert len(files) == 81
+    for path in files:
+        raw = path.read_bytes()
+        assert decode_tkms(raw).bytes_consumed == len(raw), path.name
+
+
 def test_manifest_records_the_origin_and_attribution(
     sample_dataset: Dataset, tmp_path: Path
 ) -> None:
