@@ -10,11 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import shapely
 from shapely.geometry.base import BaseGeometry
 
 from geometry_api.loader import Dataset, Territory, load_dataset
 from geometry_api.projection import Origin, project_geometry
-from geometry_api.triangulate import TriangulatedMesh, triangulate
+from geometry_api.triangulate import (
+    TriangulatedMesh,
+    quantize_to_storage_precision,
+    triangulate,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_DATASET_PATH = (
@@ -62,10 +67,16 @@ def sample_dataset() -> Dataset:
 
 @dataclass(frozen=True)
 class MeshCase:
-    """One territory carried through the whole pipeline, kept together for the assertions."""
+    """One territory carried through the whole pipeline, kept together for the assertions.
+
+    ``quantized`` is the polygon snapped to the float32 grid TKMS stores. That, not
+    ``projected``, is the surface the mesh claims to represent, so it is the reference the area
+    and coverage assertions compare against; the gap between the two is measured separately.
+    """
 
     territory: Territory
     projected: BaseGeometry
+    quantized: BaseGeometry
     mesh: TriangulatedMesh
 
     @property
@@ -78,7 +89,8 @@ def build_mesh_cases(dataset: Dataset) -> list[MeshCase]:
     cases = []
     for territory in dataset:
         projected = project_geometry(territory.geometry, origin)
-        cases.append(MeshCase(territory, projected, triangulate(projected)))
+        quantized = shapely.transform(projected, quantize_to_storage_precision)
+        cases.append(MeshCase(territory, projected, quantized, triangulate(projected)))
     return cases
 
 

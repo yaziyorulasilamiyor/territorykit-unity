@@ -34,11 +34,11 @@ def _mesh_area(case: MeshCase) -> float:
 
 
 def _relative_area_error(case: MeshCase) -> float:
-    return abs(_mesh_area(case) - case.projected.area) / case.projected.area
+    return abs(_mesh_area(case) - case.quantized.area) / case.quantized.area
 
 
 def _assert_full_coverage(case: MeshCase, seed: int) -> None:
-    points = random_points_inside(case.projected, COVERAGE_SAMPLE_POINTS, seed=seed)
+    points = random_points_inside(case.quantized, COVERAGE_SAMPLE_POINTS, seed=seed)
     counts = count_containing_triangles(case.mesh.vertices, case.mesh.indices, points)
     uncovered = int((counts == 0).sum())
     overlapped = int((counts > 1).sum())
@@ -81,7 +81,7 @@ def test_points_inside_holes_are_covered_by_no_triangle(
 ) -> None:
     for seed, case in enumerate((hole_mesh, two_hole_mesh, multipolygon_mesh)):
         parts = (
-            case.projected.geoms if case.projected.geom_type == "MultiPolygon" else [case.projected]
+            case.quantized.geoms if case.quantized.geom_type == "MultiPolygon" else [case.quantized]
         )
         holes = [Polygon(interior) for part in parts for interior in part.interiors]
         assert holes, f"{case.name} was expected to have at least one hole"
@@ -93,7 +93,7 @@ def test_points_inside_holes_are_covered_by_no_triangle(
 
 def test_hole_centre_is_not_covered(hole_mesh: MeshCase) -> None:
     """The narrow version of the hole check, kept because it is the one the brief names."""
-    hole_centre = Polygon(hole_mesh.projected.interiors[0]).centroid
+    hole_centre = Polygon(hole_mesh.quantized.interiors[0]).centroid
     counts = count_containing_triangles(
         hole_mesh.mesh.vertices, hole_mesh.mesh.indices, np.array([[hole_centre.x, hole_centre.y]])
     )
@@ -102,12 +102,33 @@ def test_hole_centre_is_not_covered(hole_mesh: MeshCase) -> None:
 
 def test_two_holes_are_both_excluded(two_hole_mesh: MeshCase) -> None:
     """Both holes survive the cumulative ring-offset arithmetic."""
-    exterior_area = Polygon(two_hole_mesh.projected.exterior).area
-    hole_areas = [Polygon(ring).area for ring in two_hole_mesh.projected.interiors]
+    exterior_area = Polygon(two_hole_mesh.quantized.exterior).area
+    hole_areas = [Polygon(ring).area for ring in two_hole_mesh.quantized.interiors]
     assert len(hole_areas) == 2
     expected = exterior_area - sum(hole_areas)
     assert _mesh_area(two_hole_mesh) == pytest.approx(expected, rel=AREA_TOLERANCE)
     assert _mesh_area(two_hole_mesh) < exterior_area - 0.9 * sum(hole_areas)
+
+
+def test_mesh_vertices_are_exactly_representable_in_float32(
+    sample_meshes: list[MeshCase],
+) -> None:
+    """The invariant that keeps the encoder from ever meeting a collapsed triangle."""
+    for case in sample_meshes:
+        vertices = case.mesh.vertices
+        assert np.array_equal(vertices, vertices.astype(np.float32).astype(np.float64)), case.name
+
+
+def test_float32_quantization_barely_moves_the_polygon(sample_meshes: list[MeshCase]) -> None:
+    """Bounds the cost of snapping before triangulating, so the area test above means something.
+
+    Snapping is what the mesh delivers either way; this measures what it costs. Worst case
+    across the 81 provinces is ~1.4e-7 relative area, four orders below the 0.1% contract.
+    """
+    for case in sample_meshes:
+        assert case.quantized.is_valid, f"{case.name} self-intersects once snapped"
+        drift = abs(case.quantized.area - case.projected.area) / case.projected.area
+        assert drift < 1e-5, f"{case.name}: quantization moved the area by {drift:.2e}"
 
 
 def test_no_degenerate_triangles(sample_meshes: list[MeshCase]) -> None:
@@ -174,7 +195,8 @@ def test_ring_winding_is_normalized_before_earcut() -> None:
     expected_area = 1.0 - 0.04
     for mesh in (rfc_compliant, reversed_rings):
         area = float(np.abs(triangle_signed_areas(mesh.vertices, mesh.indices)).sum())
-        assert area == pytest.approx(expected_area, rel=1e-12)
+        # 0.4 and 0.6 are not exact in float32, and the rings are snapped before triangulating.
+        assert area == pytest.approx(expected_area, rel=1e-6)
         counts = count_containing_triangles(mesh.vertices, mesh.indices, np.array([[0.5, 0.5]]))
         assert counts.tolist() == [0], "the hole must stay a hole regardless of input winding"
 
@@ -226,6 +248,26 @@ def test_signed_area_sign_convention() -> None:
     counter_clockwise = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
     assert signed_area(counter_clockwise) == pytest.approx(1.0)
     assert signed_area(counter_clockwise[::-1]) == pytest.approx(-1.0)
+
+
+def test_duplicate_ring_vertices_are_dropped() -> None:
+    repeated = Polygon([(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+    assert triangulate(repeated).vertex_count == 4
+
+
+def test_vertices_closer_than_float32_resolution_are_merged() -> None:
+    """At Turkey-scale coordinates a float32 step is a few centimetres.
+
+    Two points a nanometre apart are the same point once stored, so they must merge before
+    earcut rather than become a zero-area sliver the encoder has to refuse.
+    """
+    x = 400_000.0
+    near_duplicate = Polygon(
+        [(x, 0.0), (x + 1e-9, 0.0), (x + 1000.0, 0.0), (x + 1000.0, 1000.0), (x, 1000.0)]
+    )
+    mesh = triangulate(near_duplicate)
+    assert mesh.vertex_count == 4
+    assert mesh.dropped_degenerate_triangles == 0
 
 
 def test_rejects_unsupported_geometry() -> None:

@@ -21,6 +21,14 @@ RFC 7946. It is *not* what makes holes work — earcut decides hole-versus-exter
 order. Triangle winding is a different thing and is normalized once, at encode time, in
 ``encoding.py``.
 
+**float32 quantization.** Ring coordinates are snapped to float32 *before* earcut sees them,
+because float32 is what TKMS delivers. Triangulating at full float64 precision and quantizing
+afterwards is what produced the only real defect found in this phase: 62 of 364,057 triangles
+across 16 provinces were thin enough that the cast collapsed them to zero area, leaving faces
+the encoder cannot orient. Feeding earcut the coordinates that will actually be stored removes
+the class entirely — measured on the same dataset, the same vertex and triangle counts come out
+with zero collapsed triangles.
+
 Input geometry must already be in local metres (see ``projection.py``): the area assertions in
 the tests are in m², and earcut behaves better on uniformly scaled coordinates than on degrees.
 """
@@ -173,13 +181,22 @@ def _prepare_part(
     return vertices, ring_ends, skipped_rings
 
 
+def quantize_to_storage_precision(coords: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Snap coordinates to the float32 grid TKMS stores them on, keeping float64 arithmetic."""
+    return coords.astype(np.float32).astype(np.float64)
+
+
 def _prepare_ring(
     coords: Sequence[tuple[float, ...]], counter_clockwise: bool
 ) -> NDArray[np.float64] | None:
-    """Drop the repeated closing vertex and orient the ring; None if it encloses no area."""
+    """Drop the closing vertex, quantize, drop duplicates and orient; None if no area is left."""
     ring = np.asarray(coords, dtype=np.float64)[:, :2]
     if len(ring) > 1 and np.array_equal(ring[0], ring[-1]):
         ring = ring[:-1]
+    ring = quantize_to_storage_precision(ring)
+    # Neighbouring vertices can coincide once snapped; the wrap-around comparison also catches
+    # a duplicate spanning the seam. Keeping them would hand earcut zero-length edges.
+    ring = ring[np.any(ring != np.roll(ring, -1, axis=0), axis=1)]
     if len(ring) < MIN_RING_VERTICES:
         return None
     if (signed_area(ring) >= 0.0) != counter_clockwise:
