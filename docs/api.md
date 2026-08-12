@@ -19,5 +19,10 @@ uç noktaların çoğu **henüz mevcut değildir**. Faz 0'da sadece `GET /health
 - `ETag` + `Cache-Control` desteklenecek, `304 Not Modified` dönebilecek.
 - Hatalar tutarlı bir JSON şemasıyla dönecek: `{"error": {"code": ..., "message": ...}}`.
 - `lod` parametresi `high` | `medium` | `low` değerlerini alacak (bkz. Faz 2).
+- **Tüm bbox koordinatları (`/datasets/{id}` metadata, `/territories` içindeki bbox, ve
+  `/viewport?bbox=...` sorgu parametresi) yerel metre uzayındadır** —
+  [docs/projection.md](projection.md)'de tanımlanan, dataset origin'i çıkarılmış post-projection
+  koordinatlar. WGS84 derece **değildir**. Bu, Unity tarafının kamera viewport'unu doğrudan
+  aynı uzayda hesaplayıp sorgulayabilmesi içindir; ekstra bir dönüşüm gerekmez.
 
 Tam OpenAPI dokümanı Faz 3'te `/docs` altında otomatik üretilecektir.
