@@ -11,7 +11,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "services" / "geometry-api" / "data"
+OUTPUT_DIR = (
+    Path(__file__).resolve().parent.parent / "services" / "geometry-api" / "data" / "datasets"
+)
 OUTPUT_FILE = OUTPUT_DIR / "turkey-provinces.geojson"
 
 SOURCE_URL = (
@@ -21,6 +23,11 @@ SOURCE_URL = (
 
 FALLBACK_FEATURE_COLLECTION = {
     "type": "FeatureCollection",
+    "metadata": {
+        "source": "hand-written fixture (remote source unavailable)",
+        "license": "CC0-1.0",
+        "attribution": "TerritoryKit.Unity project",
+    },
     "features": [
         {
             "type": "Feature",
@@ -28,6 +35,7 @@ FALLBACK_FEATURE_COLLECTION = {
             "geometry": {
                 "type": "Polygon",
                 "coordinates": [
+                    # exterior ring: counter-clockwise (RFC 7946)
                     [[32.0, 39.0], [32.5, 39.0], [32.5, 39.5], [32.0, 39.5], [32.0, 39.0]]
                 ],
             },
@@ -48,8 +56,10 @@ FALLBACK_FEATURE_COLLECTION = {
             "geometry": {
                 "type": "Polygon",
                 "coordinates": [
+                    # exterior ring: counter-clockwise (RFC 7946)
                     [[33.0, 39.0], [34.0, 39.0], [34.0, 40.0], [33.0, 40.0], [33.0, 39.0]],
-                    [[33.4, 39.4], [33.6, 39.4], [33.6, 39.6], [33.4, 39.6], [33.4, 39.4]],
+                    # hole ring: clockwise (RFC 7946) — reversed winding vs. exterior
+                    [[33.4, 39.4], [33.4, 39.6], [33.6, 39.6], [33.6, 39.4], [33.4, 39.4]],
                 ],
             },
         },
