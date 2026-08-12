@@ -63,11 +63,28 @@ dosyanın her birinde `bytes_consumed == len(dosya)`
   **yok sayar** (ignore), reddetmez. Bu, gelecekteki v1-uyumlu uzantılar için esneklik
   bırakır — yeni davranış gerektiren değişiklikler `version` alanını artırmalıdır.
 
+## Bounding box kuralı
+
+Header'daki `minX/minY/maxX/maxY`, gövdedeki vertex'lerin **gerçek** min/max değeri olmak
+zorundadır — daha geniş bir "güvenli" kutu da geçersizdir. Gerekçe: bu kutu Faz 3 ve Faz 5'te
+viewport culling için kullanılacak; yanlış bir kutu bölgenin ekranda **bozuk görünmesine** değil,
+**hiç görünmemesine** yol açar. `NaN`/`Infinity` yasak, `min <= max` zorunlu. Referans decoder
+bunu her okumada doğrular.
+
 ## Uygulama ve doğrulama
 
 Referans uygulama: `services/geometry-api/src/geometry_api/encoding.py`
 (`encode_tkms` / `decode_tkms`). Yukarıdaki her kural en az bir yönde teste bağlıdır —
 `services/geometry-api/tests/test_encoding.py`.
+
+**Decoder ne kadar katı?** `decode_tkms(payload)` bir payload'ı *okunamaz veya güvenilmez*
+yapan her şeyi reddeder: magic, version, beyan edilen uzunluk, index hizalaması ve aralığı,
+`NaN`/`Infinity` koordinat, uint32 bayrağı tutarlılığı ve yukarıdaki bbox kuralı.
+`decode_tkms(payload, strict=True)` ayrıca mesh'in **doğru render edilmesini** sağlayan iki
+kuralı da kontrol eder: saat yönü sarım ve sıfır alanlı üçgen yokluğu. Bunlar encoder'ın
+sözleşmesidir; varsayılan okuyucu her mesh'te bu maliyeti ödemez, build hattı ve testler öder.
+Yani **varsayılan decoder "dokümanın geçersiz dediği her şeyi" reddetmez** — sarım ve dejenerasyon
+yalnızca `strict=True` ile denetlenir.
 
 Encoder tarafındaki iki karar:
 
@@ -84,6 +101,12 @@ sözleşme burada sabitlendiği için orada değişecek olan yerleştirme, forma
 Ayrıca vertex'ler üçgenlemeden **önce** float32 ızgarasına yuvarlanır (bkz. `triangulate.py`):
 float64'te üçgenleyip sonradan cast etmek, cast sırasında sıfır alana çöken — ve dolayısıyla
 yönlendirilemeyen — üçgenler üretiyordu (ölçüm: 364.057 üçgenin 62'si, 16 ilde).
+
+## Bilinen sınır: antimeridyen
+
+Mesh koordinatları dataset origin'ine göredir ve origin bbox merkezinden hesaplanır; bu yüzden
+±180° boylamını kesen dataset'ler desteklenmez (bkz. [projection.md](projection.md) — parçalar
+milyonlarca metre uzağa düşer). Bölgesel dataset'ler için bilinçli bir sınırdır.
 
 ## TKMB — Mesh Batch konteyneri (Faz 3'te kullanılır)
 

@@ -93,6 +93,19 @@ Origin **hesaplanır, yapılandırılmaz**: dataset'teki tüm bölgelerin birle�
 merkezidir. Aynı girdi her zaman aynı yerel uzayı verir — Faz 3'ün içerik-adresli cache'i buna
 dayanır. Örnek dataset için `originLon=35,2416`, `originLat=38,9562`, `scale=0,777626`.
 
+## Bilinen sınır: antimeridyen (±180°) desteklenmiyor
+
+Origin, dataset bbox'ının **merkezi** olarak hesaplanır. Antimeridyeni geçen bir dataset'te
+(ör. Fiji, Yeni Zelanda'nın Chatham adaları, Rusya) bbox `-180…+180` olur ve merkez **0°**
+çıkar — yani origin dataset'in tam karşı tarafına düşer. Ölçüm: ±180° çevresinde bölünmüş
+geçerli bir MultiPolygon'da parçalar birbirinden 38.814 km yerine **38.814 milyon metre** uzağa
+düştü.
+
+Bu **kabul edilmiş bir sınırdır**, hedef bölgesel (tek ülke ölçeğinde) dataset'ler olduğu için
+düzeltilmedi. Antimeridyen desteği gerekiyorsa origin'in bbox merkezinden değil, dairesel
+(açısal) ortalamadan hesaplanması gerekir — bu bir sonraki büyük versiyonun işi. Şimdilik:
+**boylamı ±180°'yi kesen dataset kullanmayın.**
+
 ## Durum
 
 Uygulandı — `services/geometry-api/src/geometry_api/projection.py`. Ölçülen değerler:
