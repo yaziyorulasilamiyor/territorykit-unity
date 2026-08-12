@@ -8,7 +8,7 @@ rings, so hole handling cannot be tested against it. These files are committed o
 | File | What it exercises |
 |---|---|
 | `polygon-with-hole.geojson` | Fixture C — single hole; hole exclusion |
-| `polygon-with-two-holes.geojson` | Fixture D — two holes; proves the earcut ring **end**-offset math (a single hole passes either way if start/end offsets are confused) |
+| `polygon-with-two-holes.geojson` | Fixture D — two holes; the multi-hole ring-offset bugs the binding does *not* reject. Collapsing two holes into one offset span keeps the total area exactly right and still corrupts the mesh, so only the point-coverage test catches it |
 | `multipolygon.geojson` | Three disjoint parts; index offsetting and part isolation |
 | `territorykit-dataset.json` | TerritoryKit `dataset.json` shape (`manifest` + `zones`) for loader format detection |
 
