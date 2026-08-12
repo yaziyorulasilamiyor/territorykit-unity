@@ -6,6 +6,7 @@ geoBoundaries TUR ADM1 has zero interior rings, so hole handling has no natural 
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,13 +56,24 @@ def territorykit_dataset() -> Dataset:
     return load_dataset(FIXTURES_DIR / "territorykit-dataset.json")
 
 
+REQUIRE_SAMPLE_DATASET_ENV = "GEOMETRY_API_REQUIRE_SAMPLE_DATASET"
+
+
 @pytest.fixture(scope="session")
 def sample_dataset() -> Dataset:
-    """The real geoBoundaries TUR ADM1 dataset; skipped when it has not been fetched."""
+    """The real geoBoundaries TUR ADM1 dataset.
+
+    Skipped locally when the data has not been fetched. In CI the environment variable turns
+    that skip into a failure: silently skipping here would mean the province build, the coverage
+    sweep, the uint16 ceiling and the determinism check never ran on the target Python at all.
+    """
     if not SAMPLE_DATASET_PATH.exists():
-        pytest.skip(
+        message = (
             f"sample dataset missing at {SAMPLE_DATASET_PATH}; run scripts/fetch_sample_dataset.py"
         )
+        if os.environ.get(REQUIRE_SAMPLE_DATASET_ENV):
+            pytest.fail(f"{REQUIRE_SAMPLE_DATASET_ENV} is set but the {message}")
+        pytest.skip(message)
     return load_dataset(SAMPLE_DATASET_PATH)
 
 
