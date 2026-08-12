@@ -1,62 +1,62 @@
 # Faz 1 — Geometri motoru
 
-Tarih: 2026-08-12 · Durum: Tamamlandı
-Dal: feat/phase-1-geometry-engine · Commit sayısı: 18
+Tarih: 2026-08-12 · Durum: Tamamlandı (inceleme düzeltmeleri dahil)
+Dal: feat/phase-1-geometry-engine · Commit sayısı: 27
 
 ## Ne yapıldı
-- `loader.py` — GeoJSON ve TerritoryKit `dataset.json` otomatik algılanıp tek modele normalize
-- `projection.py` — ileri/ters, vektörize; origin dataset bbox merkezinden **hesaplanıyor**
+- `loader.py` — GeoJSON + TerritoryKit `dataset.json` algılama; **geçersiz geometri reddedilir**
+- `projection.py` — ileri/ters, vektörize; origin bbox merkezinden **hesaplanıyor**
 - `triangulate.py` — kümülatif ring **bitiş** offset'leri, parça başına üçgenleme + index offset
-- `encoding.py` — TKMS v1; üçgen başına CW normalizasyonu, `flags` bit0 otomatik, `bytes_consumed`
-- `build.py` — `python -m geometry_api.build --input … --output …` → 81 mesh + `index.json`
+- `encoding.py` — TKMS v1; üçgen başına CW, `flags` bit0 otomatik, `bytes_consumed`, `strict` mod
+- `build.py` — 81 mesh + `index.json`; `--clean`, `--allow-lossy`, `--repair-invalid`
 
 ## Nasıl doğrulandı
 | Kontrol | Sonuç |
 |---|---|
-| `ruff check` + `ruff format --check` + `mypy src/` + `pytest --cov` | Temiz · **104 geçti**, kapsam **%95** |
-| Alan korunumu (81 il) | en kötü **5,4e-15** (sınır %0,1) |
+| `ruff` + `mypy` + `pytest --cov` | Temiz · **134 geçti**, kapsam **%96** |
+| Alan korunumu (81 il) · dejenere üçgen | **< 1e-12** (sözleşme %0,1) · 364.057 üçgenin **0**'ı sıfır alanlı |
 | **Kapsama** (84 geometri × 1000 nokta) | 84.000 noktanın hepsi **tam 1** üçgende |
-| Dejenere üçgen | 364.057 üçgenin **0**'ı sıfır alanlı |
-| Delik (Fixture C/D) | delik içi noktalar **0** üçgende |
-| MultiPolygon | 21 çok parçalı geometride parça-arası üçgen **yok** |
-| Winding | encode sonrası tüm üçgenler CW |
-| Round-trip (81 il, uint16+uint32) | vertex/index birebir |
-| Hassasiyet (405 nokta, ileri→ters) | en kötü **< 1e-6 m** (sözleşme < 1 m) |
+| Delik (Fixture C/D) · MultiPolygon | delik içi nokta **0** üçgende · 21 geometride parça-arası üçgen **yok** |
+| Winding · round-trip (81 il, uint16+uint32) | tüm üçgenler CW (`strict=True` ile de) · vertex/index birebir |
+| **Hassasiyet (405 nokta, project → float32 → unproject)** | en kötü **0,032 m**, p95 **0,024 m** (sözleşme < 1 m) |
 | Ölçek hatası (bbox boyunca) | **−%4,11 … +%4,81**, origin enleminde < 1e-9 |
-| Build (81 il) | 365.481 vertex, 364.057 üçgen, 5.110.782 bayt, 0,2 s |
-| Determinizm · trailing byte | iki koşu 82 dosya **0 fark** · her dosyada `bytes_consumed == len` |
+| Build (81 il) · determinizm · trailing byte | 365.481 vertex, 364.057 üçgen, 5.110.782 bayt, 0,2 s · iki koşu **0 fark** · `bytes_consumed == len` |
 
-**uint16 sınırı:** Muğla 60.478 vertex = sınırın **%92,3'ü**, **5.057 pay**; 81 ilin hepsi sığıyor, birleşik ülke mesh'i (365.481) 5,6× aşar. Build CLI %80 üstünü uyarıyor — tek tetikleyen Muğla.
+**uint16 sınırı:** Muğla 60.478 vertex = sınırın **%92,3'ü**, **5.057 pay**; 81 ilin hepsi sığıyor. Build CLI %80 üstünü uyarıyor — tek tetikleyen Muğla.
+
+## İnceleme düzeltmeleri (3 kritik + 5 önemli + 4 küçük)
+| # | Bulgu | Ne yapıldı |
+|---|---|---|
+| K1 | Geçersiz poligon sessizce mesh oluyordu | Politika açıkça **reddet**; `--repair-invalid` ile `make_valid` + sonuç doğrulaması + manifestte `repaired` |
+| K2 | Windows'ta iki bölge aynı dosyaya yazılabiliyordu | Çakışma anahtarları case-fold; `CON/PRN/AUX/NUL/COM1-9/LPT1-9` ve sondaki nokta ele alındı |
+| K3 | Çöken parça/delik sessizce kayboluyordu | Sıfır alanlı ring artık **sayılıyor**; manifestte bölge başına kayıt, uyarı satırı, `high`'da **hata** (`--allow-lossy` ile izin) |
+| Ö1 | CI gerçek veriyi hiç çalıştırmıyordu | `ci.yml` fetch betiğini koşuyor; `GEOMETRY_API_REQUIRE_SAMPLE_DATASET` ile skip **hata** sayılıyor |
+| Ö2·Ö3 | Encoder index'i sessizce cast ediyor, decoder geçersiz mesh kabul ediyordu | dtype/işaret/aralık **cast'ten önce**; bbox katı (NaN/sıra/**gerçek vertex sınırlarıyla eşitlik**); winding+dejenerasyon `strict=True`; doküman iddiası daraltıldı |
+| Ö4 | Hassasiyet testi yanlış katmanı ölçüyordu | float32 cast'i yola eklendi: **0,032 m** (eski 1e-6 sayısı kaldırıldı) |
+| Ö5 | Antimeridyen sessizdi | `projection.md` + `mesh-format.md`'ye **bilinen sınır** olarak yazıldı (38.814 km → 38.814 milyon m ölçümüyle) |
+| Kü1-3 | README/CHANGELOG eski, çıktı dizini kalıntı bırakıyor, bağımlılıklar gevşek | Güncellendi · `--clean` eklendi · sürümler `==` ile sabitlendi |
+| Kü4·Kü5 | "200 komşu çift" yanıltıcı, "5,4e-15" tekrarlanamıyordu | **200 kesişen / 197 gerçek ortak sınır** ikisi de teste bağlandı; tekrarlanamayan sayı yerine **sınır** (`< 1e-12`) |
 
 ## Faz 2 ön koşulu — paylaşılan sınır doğrulaması
-Faz 2'nin çatlak testi şuna dayanıyor: komşu illerin paylaştığı sınır noktası her iki il için de
-**aynı** değerle çıkmalı. Yuvarlama bunu bozabilecek tek adımdı. Ölçüldü (`test_shared_boundaries.py`):
-
 | Ölçüm | Sonuç |
 |---|---|
-| Komşu il çifti (STRtree + `intersects`) | 200 |
+| Kesişen il çifti · **gerçek ortak sınırı olan** | 200 · **197** (3'ü tek noktada temas) |
 | En az bir **birebir eşit** kaynak vertex'i paylaşan çift | **200 / 200** |
-| Toplam paylaşılan vertex | 58.179 |
-| Projeksiyon + yuvarlama sonrası **farklı** değere düşen | **0** |
+| Toplam paylaşılan vertex · yuvarlama sonrası sapan | 58.179 · **0** |
 
-Mekanizma ayrıca sabitlendi: projeksiyon ve yuvarlama eleman bazlı — aynı koordinat tek başına ve 5000
-noktalık dizi içinde **aynı baytı** veriyor. **Faz 2 sağlam zeminde başlıyor**; kalan risk yuvarlamada
-değil, arc grafiğinin eşitlik yerine toleransla kurulmasında olur.
+Mekanizma da sabitlendi: yuvarlama eleman bazlı — aynı koordinat tek başına ve 5000 noktalık dizi içinde **aynı baytı** veriyor. **Faz 2 sağlam zeminde başlıyor.**
 
 ## Kararlar ve gerekçeleri
-1. **Yuvarlama üçgenlemeden ÖNCE** — sonra cast etmek 16 ilde 62 üçgeni sıfır alana çökertiyordu
-   (yönlendirilemez). Yuvarlanmış girdiyle sayılar aynı, çöken üçgen 0, alan kaybı ≤ 1,4e-7.
-   Alternatif (encode'da atmak) reddedildi: semptomu gizler, kök nedeni bırakır.
-2. **Kapsama testi alan testinin üstüne** — ölçtüm: hatalı ring offset'i (`[4,8,12]` yerine `[4,12]`)
-   toplam alanı **tam doğru** veriyor ama boşluk + çakışma bırakıyor. Alan testi görmüyor, kapsama görüyor.
-3. **Trailing byte'ta okuyucu hoşgörülü, yazıcı katı** — doküman "yok say" diyor, o kaldı; ama
-   `bytes_consumed` eklendi ve kendi 81 dosyamızın sıfır dolgu ürettiği testle sabitlendi.
+1. **Yuvarlama üçgenlemeden ÖNCE** — sonra cast etmek 16 ilde 62 üçgeni sıfır alana çökertiyordu.
+   Yuvarlanmış girdiyle sayılar aynı, çöken üçgen 0, alan kaybı ≤ 1,4e-7.
+2. **Geçersiz geometride reddet, onarma varsayılan değil** — `make_valid` şekli değiştirir; bu bir
+   karar olmalı. Onarılan bölge manifestte işaretleniyor.
+3. **Kayıp veri `high`'da hatadır** — Faz 2'nin alt seviyeleri detayı bilerek atacak; bu kapı yalnızca atmadığını iddia eden seviye için.
 
 ## Bilinen eksikler ve riskler
-- `cos(originLat)` **düzeltilmedi, ölçüldü**: uçlarda ~%4-5 sapma — sınır çizimi için yeterli, mesafe ölçümü için değil.
-- **Muğla payı %7,7** — dataset güncellenirse sınır aşılabilir; `test_mugla_stays_under_the_uint16_limit` nöbette.
+- `cos(originLat)` **düzeltilmedi, ölçüldü**: uçlarda ~%4-5 sapma — mesafe ölçümü için kullanılamaz. **Antimeridyen desteklenmiyor** (Ö5) · **Muğla payı %7,7**, regresyon testinde.
 - Kapsama noktaları rastgele; kenara **tam** düşen nokta iki üçgende sayılır. Olasılık ~0, ama varsayım.
-- Gerçek dataset'te **delik yok** — delik yolu tamamen elle yazılmış fixture'lara dayanıyor.
+- Gerçek dataset'te **delik yok** — delik ve kayıp yolları elle yazılmış fixture'lara dayanıyor.
 - Docker doğrulanmadı (Faz 0 tıkanması sürüyor); yerel Python 3.14, hedef 3.12 → doğrulama CI'da.
 
 ## Tıkanmalar — Yok
@@ -66,5 +66,5 @@ değil, arc grafiğinin eşitlik yerine toleransla kurulmasında olur.
 
 ## Değişen dosyalar
 - `src/geometry_api/`: `loader.py`, `projection.py`, `triangulate.py`, `encoding.py`, `build.py`
-- `tests/`: `conftest.py`, `helpers.py`, `test_shared_boundaries.py`, `test_{loader,projection,triangulate,encoding,build}.py`
-- `tests/fixtures/`: 4 fixture + `README.md` · `docs/`: `projection.md`, `mesh-format.md`
+- `tests/`: `conftest.py`, `helpers.py`, `test_shared_boundaries.py`, `test_{loader,projection,triangulate,encoding,build}.py` · `tests/fixtures/`: 6 fixture
+- `docs/`: `projection.md`, `mesh-format.md` · `.github/workflows/ci.yml`, `pyproject.toml`, `README.md`, `CHANGELOG.md`
