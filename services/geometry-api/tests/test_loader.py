@@ -136,6 +136,54 @@ def test_territorykit_dataset_file_matches_upstream_schema(fixtures_dir) -> None
     assert {"id", "level", "childIds", "neighborIds", "geometry", "bbox"} <= set(raw["zones"][0])
 
 
+def test_self_intersecting_geometry_is_rejected_by_default(fixtures_dir) -> None:
+    """A bow-tie has zero shoelace area, and earcut will still emit a triangle for it.
+
+    Accepting one means shipping a mesh that represents no region at all, so the default is to
+    refuse rather than to guess what the author meant.
+    """
+    with pytest.raises(DatasetError, match="invalid geometry: Self-intersection"):
+        load_dataset(fixtures_dir / "bowtie.geojson")
+
+
+def test_self_intersecting_geometry_can_be_repaired_on_request(fixtures_dir) -> None:
+    dataset = load_dataset(fixtures_dir / "bowtie.geojson", on_invalid="repair")
+    territory = dataset.territories[0]
+
+    assert territory.repaired is True, "the change must be visible downstream, not silent"
+    assert territory.geometry.is_valid
+    assert territory.geometry.geom_type == "MultiPolygon"
+    assert territory.part_count == 2, "make_valid splits the bow-tie into its two lobes"
+    assert territory.geometry.area > 0
+
+
+def test_repair_rejects_geometry_that_cannot_be_saved() -> None:
+    """make_valid on a collapsed ring yields a line; a line is not a region."""
+    document = _feature_collection(
+        _feature(
+            {"id": "line"},
+            {"type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]]},
+        )
+    )
+    with pytest.raises(DatasetError, match="could not produce a usable surface|encloses no area"):
+        load_document(document, on_invalid="repair")
+
+
+def test_unknown_invalid_policy_is_rejected() -> None:
+    with pytest.raises(DatasetError, match="unknown on_invalid policy"):
+        load_document(_feature_collection(_feature({"id": "a"})), on_invalid="ignore")  # type: ignore[arg-type]
+
+
+def test_valid_geometry_is_not_flagged_as_repaired(multipolygon_dataset: Dataset) -> None:
+    assert all(not t.repaired for t in multipolygon_dataset)
+
+
+def test_real_dataset_has_no_invalid_geometry(sample_dataset: Dataset) -> None:
+    """Loading the real dataset with the strict default is itself the assertion."""
+    assert all(not territory.repaired for territory in sample_dataset)
+    assert all(territory.geometry.is_valid for territory in sample_dataset)
+
+
 def test_real_dataset_loads_all_provinces(sample_dataset: Dataset) -> None:
     assert sample_dataset.source_format == "geojson"
     assert len(sample_dataset) == 81
