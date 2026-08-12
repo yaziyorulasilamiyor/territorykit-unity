@@ -54,6 +54,12 @@ class DecodedMesh:
     bbox: tuple[float, float, float, float]
     flags: int
     version: int
+    bytes_consumed: int
+    """Header plus body, as the header declares it.
+
+    The decoder tolerates trailing bytes but reports how many it actually used, so a caller can
+    tell padding from payload — and so our own pipeline can be held to producing none.
+    """
 
     @property
     def vertex_count(self) -> int:
@@ -154,6 +160,7 @@ def decode_tkms(payload: bytes) -> DecodedMesh:
         bbox=(min_x, min_y, max_x, max_y),
         flags=int(flags),
         version=int(version),
+        bytes_consumed=expected_length,
     )
 
 
