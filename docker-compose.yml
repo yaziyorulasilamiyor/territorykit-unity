@@ -1,0 +1,11 @@
+services:
+  geometry-api:
+    build:
+      context: ./services/geometry-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/geometry-api/src:/app/src
+    environment:
+      GEOMETRY_API_DATASET_DIR: /app/data/datasets
+      GEOMETRY_API_CACHE_DIR: /app/data/cache
