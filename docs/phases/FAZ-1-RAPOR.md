@@ -1,7 +1,7 @@
 # Faz 1 — Geometri motoru
 
 Tarih: 2026-08-12 · Durum: Tamamlandı (inceleme düzeltmeleri dahil)
-Dal: feat/phase-1-geometry-engine · Commit sayısı: 27
+Dal: feat/phase-1-geometry-engine · Commit sayısı: 29
 
 ## Ne yapıldı
 - `loader.py` — GeoJSON + TerritoryKit `dataset.json` algılama; **geçersiz geometri reddedilir**
