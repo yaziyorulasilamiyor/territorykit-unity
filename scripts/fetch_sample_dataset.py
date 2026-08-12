@@ -1,8 +1,10 @@
-"""Downloads a small sample GeoJSON dataset (Turkey province boundaries) for local
+"""Downloads a sample GeoJSON dataset (Turkey ADM1 province boundaries) for local
 development and testing. Output is git-ignored — never commit fetched data.
 
-If the remote source is unavailable, falls back to a hand-written 3-polygon
-fixture so the pipeline can still be exercised offline.
+Tries the primary source first (geoBoundaries gbOpen TUR ADM1, pinned to a fixed
+commit for reproducibility), then a simplified fallback from the same commit, and
+finally falls back to a hand-written 3-polygon fixture so the pipeline can still be
+exercised fully offline.
 """
 
 import json
@@ -16,15 +18,29 @@ OUTPUT_DIR = (
 )
 OUTPUT_FILE = OUTPUT_DIR / "turkey-provinces.geojson"
 
-SOURCE_URL = (
-    "https://raw.githubusercontent.com/cihadturhan/tr-geojson/master/"
-    "TR-Iller.json"
+GEOBOUNDARIES_COMMIT = "9469f09"
+
+PRIMARY_SOURCE_URL = (
+    "https://github.com/wmgeolab/geoBoundaries/raw/"
+    f"{GEOBOUNDARIES_COMMIT}/releaseData/gbOpen/TUR/ADM1/geoBoundaries-TUR-ADM1.geojson"
 )
+FALLBACK_SOURCE_URL = (
+    "https://github.com/wmgeolab/geoBoundaries/raw/"
+    f"{GEOBOUNDARIES_COMMIT}/releaseData/gbOpen/TUR/ADM1/geoBoundaries-TUR-ADM1_simplified.geojson"
+)
+
+GEOBOUNDARIES_METADATA = {
+    "source": "geoBoundaries gbOpen TUR ADM1 (OpenStreetMap)",
+    "license": "CC BY-SA 2.0",
+    "attribution": "© OpenStreetMap contributors, via geoBoundaries (wmgeolab)",
+    "sourceUrl": "https://www.geoboundaries.org/",
+    "sourceCommit": GEOBOUNDARIES_COMMIT,
+}
 
 FALLBACK_FEATURE_COLLECTION = {
     "type": "FeatureCollection",
     "metadata": {
-        "source": "hand-written fixture (remote source unavailable)",
+        "source": "hand-written fixture (remote sources unavailable)",
         "license": "CC0-1.0",
         "attribution": "TerritoryKit.Unity project",
     },
@@ -67,25 +83,34 @@ FALLBACK_FEATURE_COLLECTION = {
 }
 
 
-def fetch_remote() -> dict:
-    with urllib.request.urlopen(SOURCE_URL, timeout=15) as response:
+def fetch_url(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    data: dict
+    source: str
     try:
-        data = fetch_remote()
-        source = "remote"
+        data = fetch_url(PRIMARY_SOURCE_URL)
+        source = "geoBoundaries (primary)"
+        data["metadata"] = GEOBOUNDARIES_METADATA
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        print(f"Remote fetch failed ({exc}); using fallback fixture.", file=sys.stderr)
-        data = FALLBACK_FEATURE_COLLECTION
-        source = "fallback"
+        print(f"Primary source failed ({exc}); trying simplified fallback.", file=sys.stderr)
+        try:
+            data = fetch_url(FALLBACK_SOURCE_URL)
+            source = "geoBoundaries (simplified fallback)"
+            data["metadata"] = GEOBOUNDARIES_METADATA
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc2:
+            print(f"Simplified fallback failed ({exc2}); using fixture.", file=sys.stderr)
+            data = FALLBACK_FEATURE_COLLECTION
+            source = "hand-written fixture"
 
     OUTPUT_FILE.write_text(json.dumps(data), encoding="utf-8")
     feature_count = len(data.get("features", []))
-    print(f"Wrote {feature_count} features from {source} source to {OUTPUT_FILE}")
+    print(f"Wrote {feature_count} features from {source} to {OUTPUT_FILE}")
     return 0
 
 
