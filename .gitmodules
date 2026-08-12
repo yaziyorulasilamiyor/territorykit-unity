@@ -1,0 +1,3 @@
+[submodule "vendor/territorykit"]
+	path = vendor/territorykit
+	url = https://github.com/yaziyorulasilamiyor/TerritoryKit.git

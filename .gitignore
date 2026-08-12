@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+*.csproj
+*.sln
+*.user
+*.unityproj
+*.tmp
+*.userprefs
+.vs/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# Sample datasets (fetched, not committed)
+services/geometry-api/data/
+scripts/data/
+
+# OS
+.DS_Store
+Thumbs.db
