@@ -49,10 +49,19 @@ def _assert_full_coverage(case: MeshCase, seed: int) -> None:
 
 
 def test_area_is_conserved_for_every_province(sample_meshes: list[MeshCase]) -> None:
+    """The contract is 0.1%; what actually comes out is machine precision.
+
+    The exact worst value is not reproducible across numpy versions and summation orders — it
+    moves around the 1e-15 range — so the assertion is a bound, and the bound is what gets
+    quoted. A measured digit nobody else can reproduce does not belong in a report.
+    """
     errors = {case.name: _relative_area_error(case) for case in sample_meshes}
     worst_name = max(errors, key=lambda name: errors[name])
     assert errors[worst_name] < AREA_TOLERANCE, (
         f"worst area error {errors[worst_name]:.2e} on {worst_name}"
+    )
+    assert errors[worst_name] < 1e-12, (
+        f"expected machine-precision agreement, measured {errors[worst_name]:.2e} on {worst_name}"
     )
 
 

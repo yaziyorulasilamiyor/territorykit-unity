@@ -28,6 +28,15 @@ from geometry_api.triangulate import quantize_to_storage_precision
 CoordinateMap = dict[tuple[float, float], tuple[float, float]]
 
 EXPECTED_ADJACENT_PAIRS = 200
+"""Province pairs whose geometries intersect at all."""
+
+EXPECTED_BOUNDARY_PAIRS = 197
+"""Of those, the ones sharing an actual boundary *line*. The other 3 meet at a single point.
+
+Phase 2's arc graph is built from shared boundaries, so a corner touch is not one of its inputs
+— the distinction is recorded here so the two numbers are never conflated in a report again.
+"""
+
 EXPECTED_SHARED_VERTICES = 58_179
 
 
@@ -77,6 +86,15 @@ def test_neighbouring_provinces_share_exact_source_vertices(
     """Claim 1: the dataset gives neighbours bit-identical vertices, not merely close ones."""
     territories, pairs = adjacency
     assert len(pairs) == EXPECTED_ADJACENT_PAIRS
+
+    with_shared_line = [
+        (i, j)
+        for i, j in pairs
+        if territories[i].geometry.intersection(territories[j].geometry).length > 0.0
+    ]
+    assert len(with_shared_line) == EXPECTED_BOUNDARY_PAIRS, (
+        "intersecting is not the same as sharing a boundary; the remainder touch at one point"
+    )
 
     vertex_sets = [
         {tuple(coordinate) for coordinate in shapely.get_coordinates(territory.geometry)}
