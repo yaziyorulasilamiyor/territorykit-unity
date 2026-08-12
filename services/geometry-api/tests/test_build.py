@@ -19,19 +19,30 @@ from geometry_api.build import (
 from geometry_api.encoding import UINT16_MAX_VERTEX_COUNT, decode_tkms
 from geometry_api.loader import Dataset, load_document
 
-_FLAT_DEGENERATE_POLYGON = {
+
+def _square(min_lon: float, min_lat: float, size: float) -> dict:
+    max_lon, max_lat = min_lon + size, min_lat + size
+    return {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [min_lon, min_lat],
+                [max_lon, min_lat],
+                [max_lon, max_lat],
+                [min_lon, max_lat],
+                [min_lon, min_lat],
+            ]
+        ],
+    }
+
+
+# A valid polygon far from the origin, small enough that float32 collapses every one of its
+# vertices onto the same point. Nothing is left to triangulate.
+_UNBUILDABLE_DOCUMENT = {
     "type": "FeatureCollection",
     "features": [
-        {
-            "type": "Feature",
-            "properties": {"id": "flat", "name": "Flat"},
-            "geometry": {
-                # Three points on one parallel stay collinear through the projection, so there
-                # is no triangle to make.
-                "type": "Polygon",
-                "coordinates": [[[30.0, 39.0], [31.0, 39.0], [32.0, 39.0], [30.0, 39.0]]],
-            },
-        }
+        {"type": "Feature", "properties": {"id": "anchor"}, "geometry": _square(25.0, 36.0, 1.0)},
+        {"type": "Feature", "properties": {"id": "speck"}, "geometry": _square(44.9, 41.9, 1e-9)},
     ],
 }
 
@@ -150,9 +161,175 @@ def test_colliding_sanitized_ids_stay_distinct() -> None:
     assert len({entry.filename for entry in entries}) == 3
 
 
+def test_ids_differing_only_in_case_get_separate_files(tmp_path: Path) -> None:
+    """Windows and macOS are case-insensitive: "A" and "a" are one file, not two.
+
+    A case-sensitive collision check let the second territory overwrite the first while the
+    manifest still listed both, so the first entry pointed at the wrong mesh.
+    """
+    document = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {"id": "A"}, "geometry": _square(30.0, 39.0, 0.5)},
+            {"type": "Feature", "properties": {"id": "a"}, "geometry": _square(31.0, 39.0, 0.7)},
+        ],
+    }
+    source = tmp_path / "case.geojson"
+    source.write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "out"
+
+    assert main(["--input", str(source), "--output", str(output), "--quiet"]) == 0
+    manifest = _read_manifest(output)
+
+    files = {entry["file"] for entry in manifest["territories"]}
+    assert len(files) == 2
+    assert len({name.casefold() for name in files}) == 2, "case alone must not distinguish them"
+    assert len(list(output.glob("*.tkms"))) == 2, "both meshes must survive on disk"
+
+    for entry in manifest["territories"]:
+        decoded = decode_tkms((output / entry["file"]).read_bytes())
+        assert decoded.vertex_count == entry["vertexCount"], (
+            f"{entry['id']} points at a mesh that is not its own"
+        )
+
+
+@pytest.mark.parametrize("reserved", ["CON", "prn", "NUL", "COM1", "lpt9", "AUX"])
+def test_windows_reserved_names_are_avoided(reserved: str, tmp_path: Path) -> None:
+    document = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"id": reserved},
+                "geometry": _square(30.0, 39.0, 0.5),
+            }
+        ],
+    }
+    entries = build_meshes(load_document(document))
+    stem = entries[0].filename.removesuffix(".tkms")
+    assert stem.upper() != reserved.upper(), f"{reserved} is a reserved device name on Windows"
+
+    source = tmp_path / "reserved.geojson"
+    source.write_text(json.dumps(document), encoding="utf-8")
+    assert main(["--input", str(source), "--output", str(tmp_path / "out"), "--quiet"]) == 0
+
+
+def test_trailing_dots_are_stripped_from_filenames() -> None:
+    document = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"id": "tr.34."},
+                "geometry": _square(30.0, 39.0, 0.5),
+            }
+        ],
+    }
+    entries = build_meshes(load_document(document))
+    assert entries[0].filename == "tr.34.tkms", "Windows cannot create a name ending in a dot"
+
+
+def test_geometry_lost_to_quantization_fails_the_high_level_build(
+    fixtures_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The high level claims to be the source geometry, so losing a hole is a failure."""
+    source = fixtures_dir / "collapsing-hole.geojson"
+    assert main(["--input", str(source), "--output", str(tmp_path / "out"), "--quiet"]) == 1
+
+    error = capsys.readouterr().err
+    assert "lost geometry to float32 quantization" in error
+    assert "--allow-lossy" in error
+    assert not (tmp_path / "out").exists()
+
+
+def test_allow_lossy_accepts_the_loss_and_records_it(
+    fixtures_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = fixtures_dir / "collapsing-hole.geojson"
+    output = tmp_path / "out"
+    assert main(["--input", str(source), "--output", str(output), "--quiet", "--allow-lossy"]) == 0
+
+    manifest = _read_manifest(output)
+    entry = manifest["territories"][0]
+    assert entry["skippedRings"] == 1
+    assert entry["skippedParts"] == 0
+    assert manifest["totals"]["skippedRings"] == 1
+    assert manifest["lossy"] is True
+    assert "lost 0 part(s) and 1 hole(s)" in capsys.readouterr().out
+
+
+def test_lossless_builds_record_zero_loss(sample_dataset: Dataset, tmp_path: Path) -> None:
+    assert main(["--input", str(SAMPLE_DATASET_PATH), "--output", str(tmp_path), "--quiet"]) == 0
+    manifest = _read_manifest(tmp_path)
+
+    assert manifest["lossy"] is False
+    assert manifest["totals"]["skippedParts"] == 0
+    assert manifest["totals"]["skippedRings"] == 0
+    assert manifest["totals"]["repairedTerritories"] == 0
+    for entry in manifest["territories"]:
+        assert entry["skippedParts"] == 0 and entry["skippedRings"] == 0, entry["name"]
+        assert entry["repaired"] is False
+
+
+def test_repair_invalid_flag_is_recorded_in_the_manifest(
+    fixtures_dir: Path, tmp_path: Path
+) -> None:
+    source = fixtures_dir / "bowtie.geojson"
+    output = tmp_path / "out"
+    assert main(["--input", str(source), "--output", str(output)]) == 1, "rejected by default"
+
+    assert main(["--input", str(source), "--output", str(output), "--repair-invalid"]) == 0
+    manifest = _read_manifest(output)
+    assert manifest["territories"][0]["repaired"] is True
+    assert manifest["totals"]["repairedTerritories"] == 1
+
+
+def test_clean_removes_meshes_from_an_earlier_run(
+    territorykit_dataset: Dataset, tmp_path: Path, fixtures_dir: Path
+) -> None:
+    output = tmp_path / "out"
+    assert (
+        main(
+            [
+                "--input",
+                str(fixtures_dir / "territorykit-dataset.json"),
+                "--output",
+                str(output),
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    stale = output / "left-over.tkms"
+    stale.write_bytes(b"not a mesh")
+    unrelated = output / "notes.txt"
+    unrelated.write_text("keep me", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "--input",
+                str(fixtures_dir / "multipolygon.geojson"),
+                "--output",
+                str(output),
+                "--quiet",
+                "--clean",
+            ]
+        )
+        == 0
+    )
+
+    assert not stale.exists(), "a clean build must not leave meshes from another dataset"
+    assert unrelated.exists(), "only files this tool writes may be deleted"
+    manifest = _read_manifest(output)
+    assert {entry["file"] for entry in manifest["territories"]} == {
+        path.name for path in output.glob("*.tkms")
+    }
+
+
 def test_a_failing_territory_fails_the_whole_build() -> None:
-    dataset = load_document(_FLAT_DEGENERATE_POLYGON)
-    with pytest.raises(BuildError, match="1 of 1 territories failed"):
+    dataset = load_document(_UNBUILDABLE_DOCUMENT)
+    with pytest.raises(BuildError, match="1 of 2 territories failed"):
         build_meshes(dataset)
 
 
@@ -160,7 +337,7 @@ def test_nothing_is_written_when_the_build_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = tmp_path / "broken.geojson"
-    source.write_text(json.dumps(_FLAT_DEGENERATE_POLYGON), encoding="utf-8")
+    source.write_text(json.dumps(_UNBUILDABLE_DOCUMENT), encoding="utf-8")
     output = tmp_path / "out"
 
     assert main(["--input", str(source), "--output", str(output)]) == 1

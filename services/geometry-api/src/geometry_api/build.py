@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
-from .loader import Dataset, DatasetError, Territory, load_dataset
+from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
 from .projection import Origin, ProjectionError, project_geometry
 from .triangulate import TriangulationError, triangulate
 
@@ -39,6 +39,13 @@ UINT16_WARNING_RATIO = 0.8
 """Warn once a mesh uses this much of the uint16 index space, so the ceiling is never a surprise."""
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{digit}" for digit in range(1, 10)}
+    | {f"LPT{digit}" for digit in range(1, 10)}
+)
+"""Windows refuses these names whatever the extension, so a territory called CON needs a nudge."""
 
 
 class BuildError(RuntimeError):
@@ -57,10 +64,17 @@ class MeshEntry:
     part_count: int
     bounds_local: tuple[float, float, float, float]
     uses_uint32_indices: bool
+    skipped_parts: int = 0
+    skipped_rings: int = 0
 
     @property
     def uint16_usage(self) -> float:
         return self.vertex_count / UINT16_MAX_VERTEX_COUNT
+
+    @property
+    def is_lossy(self) -> bool:
+        """True when quantization dropped a part or a hole that the source geometry had."""
+        return bool(self.skipped_parts or self.skipped_rings)
 
     def as_manifest_entry(self) -> dict[str, Any]:
         return {
@@ -73,13 +87,23 @@ class MeshEntry:
             "indexFormat": "uint32" if self.uses_uint32_indices else "uint16",
             "byteLength": len(self.payload),
             "bboxLocal": list(self.bounds_local),
+            "skippedParts": self.skipped_parts,
+            "skippedRings": self.skipped_rings,
+            "repaired": self.territory.repaired,
             "parentId": self.territory.parent_id,
             "neighborIds": list(self.territory.neighbor_ids),
         }
 
 
-def build_meshes(dataset: Dataset, lod: str = LOD_HIGH) -> list[MeshEntry]:
-    """Build every territory in memory. Raises BuildError listing all failures, not just one."""
+def build_meshes(
+    dataset: Dataset, lod: str = LOD_HIGH, allow_lossy: bool = False
+) -> list[MeshEntry]:
+    """Build every territory in memory. Raises BuildError listing all failures, not just one.
+
+    At ``high`` the mesh is supposed to be the source geometry, so a part or hole lost to float32
+    quantization is a build failure unless ``allow_lossy`` says otherwise. Phase 2's lower levels
+    drop detail on purpose; this gate is only about the level that claims not to.
+    """
     if lod not in AVAILABLE_LODS:
         raise BuildError(f"unknown lod {lod!r}; available: {', '.join(AVAILABLE_LODS)}")
 
@@ -108,12 +132,27 @@ def build_meshes(dataset: Dataset, lod: str = LOD_HIGH) -> list[MeshEntry]:
                 part_count=mesh.part_count,
                 bounds_local=mesh.bounds,
                 uses_uint32_indices=mesh.vertex_count > UINT16_MAX_VERTEX_COUNT,
+                skipped_parts=mesh.skipped_parts,
+                skipped_rings=mesh.skipped_rings,
             )
         )
 
     if failures:
         raise BuildError(
             f"{len(failures)} of {len(dataset)} territories failed:\n  " + "\n  ".join(failures)
+        )
+
+    lossy = [entry for entry in entries if entry.is_lossy]
+    if lossy and lod == LOD_HIGH and not allow_lossy:
+        detail = "\n  ".join(
+            f"{entry.territory.id} ({entry.territory.name}): "
+            f"{entry.skipped_parts} part(s), {entry.skipped_rings} hole(s) lost"
+            for entry in lossy
+        )
+        raise BuildError(
+            f"{len(lossy)} territories lost geometry to float32 quantization at lod '{LOD_HIGH}', "
+            f"which is supposed to preserve the source. Re-run with --allow-lossy to accept it "
+            f"(the counts are recorded per territory in the manifest either way):\n  " + detail
         )
     return entries
 
@@ -145,14 +184,33 @@ def build_manifest(dataset: Dataset, entries: Sequence[MeshEntry], lod: str) -> 
             "vertices": sum(entry.vertex_count for entry in entries),
             "triangles": sum(entry.triangle_count for entry in entries),
             "bytes": sum(len(entry.payload) for entry in entries),
+            "skippedParts": sum(entry.skipped_parts for entry in entries),
+            "skippedRings": sum(entry.skipped_rings for entry in entries),
+            "repairedTerritories": sum(1 for entry in entries if entry.territory.repaired),
         },
+        "lossy": any(entry.is_lossy for entry in entries),
         "sourceMetadata": dict(dataset.metadata),
         "territories": [entry.as_manifest_entry() for entry in entries],
     }
 
 
-def write_build(output_dir: Path, entries: Sequence[MeshEntry], manifest: dict[str, Any]) -> None:
+def write_build(
+    output_dir: Path,
+    entries: Sequence[MeshEntry],
+    manifest: dict[str, Any],
+    clean: bool = False,
+) -> None:
+    """Write the meshes and the manifest.
+
+    ``clean`` removes meshes left by an earlier run so the directory describes exactly one
+    build. It only ever deletes files this tool writes — never the directory itself, and never
+    anything it did not put there.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+    if clean:
+        for stale in output_dir.glob(f"*{MESH_SUFFIX}"):
+            stale.unlink()
+        (output_dir / MANIFEST_FILENAME).unlink(missing_ok=True)
     for entry in entries:
         (output_dir / entry.filename).write_bytes(entry.payload)
     text = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -160,14 +218,23 @@ def write_build(output_dir: Path, entries: Sequence[MeshEntry], manifest: dict[s
 
 
 def _unique_filename(territory_id: str, used: dict[str, str]) -> str:
-    """Territory ids may contain characters no filesystem accepts (TerritoryKit uses colons)."""
-    stem = _UNSAFE_FILENAME_CHARS.sub("_", territory_id) or "territory"
+    """Turn a territory id into a filename no filesystem will quietly merge with another.
+
+    Ids may contain characters that are not valid in a path (TerritoryKit uses colons), and
+    collisions are tracked case-insensitively: on Windows and macOS "A" and "a" are the same
+    file, so a case-sensitive check would let one territory overwrite another while the manifest
+    still listed both.
+    """
+    stem = _UNSAFE_FILENAME_CHARS.sub("_", territory_id).rstrip(". ") or "territory"
+    if stem.upper() in _WINDOWS_RESERVED_STEMS:
+        stem = f"{stem}_"
+
     candidate = stem
     suffix = 1
-    while candidate in used and used[candidate] != territory_id:
+    while candidate.casefold() in used and used[candidate.casefold()] != territory_id:
         suffix += 1
         candidate = f"{stem}-{suffix}"
-    used[candidate] = territory_id
+    used[candidate.casefold()] = territory_id
     return candidate + MESH_SUFFIX
 
 
@@ -204,6 +271,23 @@ def _print_index_warnings(entries: Sequence[MeshEntry], stream: Any) -> None:
         )
 
 
+def _print_loss_warnings(entries: Sequence[MeshEntry], stream: Any) -> None:
+    for entry in entries:
+        if entry.is_lossy:
+            print(
+                f"warning: {entry.territory.name} lost {entry.skipped_parts} part(s) and "
+                f"{entry.skipped_rings} hole(s) to float32 quantization — they are too small to "
+                f"survive the storage grid (recorded in {MANIFEST_FILENAME})",
+                file=stream,
+            )
+        if entry.territory.repaired:
+            print(
+                f"warning: {entry.territory.name} had invalid source geometry and was rebuilt "
+                f"with make_valid; its shape is not exactly the source shape",
+                file=stream,
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m geometry_api.build",
@@ -214,25 +298,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--output",
         required=True,
         type=Path,
-        help="output directory; existing files are overwritten but never deleted",
+        help="output directory; existing meshes are overwritten (see --clean)",
     )
     parser.add_argument("--lod", default=LOD_HIGH, choices=AVAILABLE_LODS)
     parser.add_argument("--quiet", action="store_true", help="suppress the per-territory table")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="delete meshes and the manifest left by an earlier run before writing",
+    )
+    parser.add_argument(
+        "--allow-lossy",
+        action="store_true",
+        help="accept parts or holes lost to float32 quantization at the high level",
+    )
+    parser.add_argument(
+        "--repair-invalid",
+        action="store_true",
+        help="rebuild self-intersecting geometry with make_valid instead of rejecting it",
+    )
     args = parser.parse_args(argv)
 
+    on_invalid: InvalidGeometryPolicy = "repair" if args.repair_invalid else "reject"
     try:
-        dataset = load_dataset(args.input)
-        entries = build_meshes(dataset, lod=args.lod)
+        dataset = load_dataset(args.input, on_invalid=on_invalid)
+        entries = build_meshes(dataset, lod=args.lod, allow_lossy=args.allow_lossy)
     except (DatasetError, BuildError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     manifest = build_manifest(dataset, entries, args.lod)
-    write_build(args.output, entries, manifest)
+    write_build(args.output, entries, manifest, clean=args.clean)
 
     if not args.quiet:
         _print_report(entries, manifest, sys.stdout)
     _print_index_warnings(entries, sys.stderr)
+    _print_loss_warnings(entries, sys.stdout)
     print(f"wrote {len(entries)} meshes and {MANIFEST_FILENAME} to {args.output}")
     return 0
 
