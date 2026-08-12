@@ -199,7 +199,13 @@ def _prepare_ring(
     ring = ring[np.any(ring != np.roll(ring, -1, axis=0), axis=1)]
     if len(ring) < MIN_RING_VERTICES:
         return None
-    if (signed_area(ring) >= 0.0) != counter_clockwise:
+
+    area = signed_area(ring)
+    if area == 0.0:
+        # Quantization flattened the ring onto a line. It encloses nothing now, and the caller
+        # counts it as lost rather than handing earcut a ring that silently contributes nothing.
+        return None
+    if (area >= 0.0) != counter_clockwise:
         ring = ring[::-1]
     return np.ascontiguousarray(ring)
 
