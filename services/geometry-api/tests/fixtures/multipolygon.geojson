@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "source": "hand-written fixture",
+    "license": "CC0-1.0",
+    "attribution": "TerritoryKit.Unity project"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "fixture-e", "name": "Fixture E (three parts)" },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [[[30.0, 39.0], [30.5, 39.0], [30.5, 39.5], [30.0, 39.5], [30.0, 39.0]]],
+          [[[31.0, 39.0], [31.5, 39.0], [31.5, 39.5], [31.0, 39.5], [31.0, 39.0]]],
+          [
+            [[32.0, 39.0], [32.8, 39.0], [32.8, 39.8], [32.0, 39.8], [32.0, 39.0]],
+            [[32.3, 39.3], [32.3, 39.5], [32.5, 39.5], [32.5, 39.3], [32.3, 39.3]]
+          ]
+        ]
+      }
+    }
+  ]
+}

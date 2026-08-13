@@ -41,6 +41,12 @@ Okuyucu, aldığı byte dizisinin uzunluğunu bu formülle karşılaştırmalıd
 onu yok sayar (ör. hizalama dolgusu); ancak dizide bu formülden **az** byte varsa geçersiz
 mesh'tir ve reddedilmelidir.
 
+Bu hoşgörü **okuyucu içindir, yazıcı için değil.** `decode_tkms`, kullandığı byte sayısını
+`bytes_consumed` alanıyla döndürür; böylece çağıran dolguyu yükten ayırt edebilir. Bu projenin
+kendi çıktısında dolgu **yoktur** ve bu bir testle sabitlenmiştir: build CLI'ın ürettiği 81
+dosyanın her birinde `bytes_consumed == len(dosya)`
+(`tests/test_build.py::test_written_meshes_carry_no_trailing_bytes`).
+
 ## Kurallar
 
 - `vertexCount > 65535` ise `flags` bit0 = 1 olmak **zorunda** (Unity `IndexFormat.UInt32` limiti).
@@ -56,6 +62,51 @@ mesh'tir ve reddedilmelidir.
 - **Bilinmeyen flag bitleri** (bit0 dışındaki tüm bitler, v1'de tanımsız): okuyucu bunları
   **yok sayar** (ignore), reddetmez. Bu, gelecekteki v1-uyumlu uzantılar için esneklik
   bırakır — yeni davranış gerektiren değişiklikler `version` alanını artırmalıdır.
+
+## Bounding box kuralı
+
+Header'daki `minX/minY/maxX/maxY`, gövdedeki vertex'lerin **gerçek** min/max değeri olmak
+zorundadır — daha geniş bir "güvenli" kutu da geçersizdir. Gerekçe: bu kutu Faz 3 ve Faz 5'te
+viewport culling için kullanılacak; yanlış bir kutu bölgenin ekranda **bozuk görünmesine** değil,
+**hiç görünmemesine** yol açar. `NaN`/`Infinity` yasak, `min <= max` zorunlu. Referans decoder
+bunu her okumada doğrular.
+
+## Uygulama ve doğrulama
+
+Referans uygulama: `services/geometry-api/src/geometry_api/encoding.py`
+(`encode_tkms` / `decode_tkms`). Yukarıdaki her kural en az bir yönde teste bağlıdır —
+`services/geometry-api/tests/test_encoding.py`.
+
+**Decoder ne kadar katı?** `decode_tkms(payload)` bir payload'ı *okunamaz veya güvenilmez*
+yapan her şeyi reddeder: magic, version, beyan edilen uzunluk, index hizalaması ve aralığı,
+`NaN`/`Infinity` koordinat, uint32 bayrağı tutarlılığı ve yukarıdaki bbox kuralı.
+`decode_tkms(payload, strict=True)` ayrıca mesh'in **doğru render edilmesini** sağlayan iki
+kuralı da kontrol eder: saat yönü sarım ve sıfır alanlı üçgen yokluğu. Bunlar encoder'ın
+sözleşmesidir; varsayılan okuyucu her mesh'te bu maliyeti ödemez, build hattı ve testler öder.
+Yani **varsayılan decoder "dokümanın geçersiz dediği her şeyi" reddetmez** — sarım ve dejenerasyon
+yalnızca `strict=True` ile denetlenir.
+
+Encoder tarafındaki iki karar:
+
+- **Sarım yönü üçgen başına hesaplanır.** İşaretli alanı pozitif (CCW) çıkan her üçgende iki
+  index takas edilir. Kör çevirme yapılmaz; earcut'ın çıktısı bugün tekdüze CCW olsa da, bu
+  değiştiği gün kör çevirme tüm yüzleri sessizce ters çevirirdi.
+- **`flags` bit0 çağıran tarafından verilmez**, `vertexCount > 65535` koşulundan türetilir —
+  unutulması mümkün değil.
+
+Sarım garantisi mesh'in **kendi XY uzayı** içindir. Unity'nin `(x, y)`'yi hangi eksenlere
+yerleştirdiği ön yüzün ekranda doğru görünüp görünmediğini belirler; bu Faz 4'ün konusudur ve
+sözleşme burada sabitlendiği için orada değişecek olan yerleştirme, formattır değil.
+
+Ayrıca vertex'ler üçgenlemeden **önce** float32 ızgarasına yuvarlanır (bkz. `triangulate.py`):
+float64'te üçgenleyip sonradan cast etmek, cast sırasında sıfır alana çöken — ve dolayısıyla
+yönlendirilemeyen — üçgenler üretiyordu (ölçüm: 364.057 üçgenin 62'si, 16 ilde).
+
+## Bilinen sınır: antimeridyen
+
+Mesh koordinatları dataset origin'ine göredir ve origin bbox merkezinden hesaplanır; bu yüzden
+±180° boylamını kesen dataset'ler desteklenmez (bkz. [projection.md](projection.md) — parçalar
+milyonlarca metre uzağa düşer). Bölgesel dataset'ler için bilinçli bir sınırdır.
 
 ## TKMB — Mesh Batch konteyneri (Faz 3'te kullanılır)
 

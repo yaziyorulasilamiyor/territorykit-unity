@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "source": "hand-written fixture",
+    "license": "CC0-1.0",
+    "attribution": "TerritoryKit.Unity project"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "fixture-f", "name": "Fixture F (self-intersecting bow-tie)" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[33.0, 39.0], [34.0, 40.0], [34.0, 39.0], [33.0, 40.0], [33.0, 39.0]]
+        ]
+      }
+    }
+  ]
+}

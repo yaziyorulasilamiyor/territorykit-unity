@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "source": "hand-written fixture",
+    "license": "CC0-1.0",
+    "attribution": "TerritoryKit.Unity project"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "fixture-d", "name": "Fixture D (two holes)" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[33.0, 39.0], [34.0, 39.0], [34.0, 40.0], [33.0, 40.0], [33.0, 39.0]],
+          [[33.15, 39.15], [33.15, 39.35], [33.35, 39.35], [33.35, 39.15], [33.15, 39.15]],
+          [[33.65, 39.65], [33.65, 39.85], [33.85, 39.85], [33.85, 39.65], [33.65, 39.65]]
+        ]
+      }
+    }
+  ]
+}

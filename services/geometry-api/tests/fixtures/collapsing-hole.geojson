@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "source": "hand-written fixture",
+    "license": "CC0-1.0",
+    "attribution": "TerritoryKit.Unity project"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "fixture-g",
+        "name": "Fixture G (valid hole that goes collinear in float32)"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[25.0, 36.0], [45.0, 36.0], [45.0, 42.0], [25.0, 42.0], [25.0, 36.0]],
+          [
+            [40.0, 41.9],
+            [42.0, 41.90000001],
+            [44.5, 41.9],
+            [40.0, 41.9]
+          ]
+        ]
+      }
+    }
+  ]
+}

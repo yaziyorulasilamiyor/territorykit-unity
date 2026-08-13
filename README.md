@@ -4,7 +4,21 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 [TerritoryKit](https://github.com/mberatkaya/TerritoryKit) açık kaynak geospatial SDK'sının
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
-> Durum: Erken geliştirme (Faz 0). Henüz kullanılabilir bir sürüm yok.
+> Durum: Erken geliştirme (Faz 1 tamamlandı — geometri motoru). Henüz kullanılabilir bir sürüm yok.
+
+## Mesh üretimi (Faz 1)
+
+Örnek veriyi indirip tüm bölgeler için TKMS mesh üretmek:
+
+```bash
+python scripts/fetch_sample_dataset.py
+cd services/geometry-api
+python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes
+```
+
+Çıktı: bölge başına bir `.tkms` dosyası ve origin, bölge sayıları, bbox ve kaynak lisansını
+taşıyan bir `index.json`. Geçersiz geometri varsayılan olarak reddedilir (`--repair-invalid`),
+float32 ızgarasında kaybolan parça/delik `high` seviyesinde hata verir (`--allow-lossy`).
 
 ## Bileşenler
 

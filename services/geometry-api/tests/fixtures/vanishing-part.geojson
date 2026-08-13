@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "source": "hand-written fixture",
+    "license": "CC0-1.0",
+    "attribution": "TerritoryKit.Unity project"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "fixture-h",
+        "name": "Fixture H (third part survives quantization but every triangle is degenerate)"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [[[25.0, 36.0], [30.0, 36.0], [30.0, 40.0], [25.0, 40.0], [25.0, 36.0]]],
+          [[[35.0, 36.0], [40.0, 36.0], [40.0, 40.0], [35.0, 40.0], [35.0, 36.0]]],
+          [
+            [
+              [32.5, 38.0],
+              [32.5000000001, 38.0],
+              [32.5000000001, 38.0000000001],
+              [32.5, 38.0000000001],
+              [32.5, 38.0]
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
