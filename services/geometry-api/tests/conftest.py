@@ -57,6 +57,28 @@ def territorykit_dataset() -> Dataset:
 
 
 REQUIRE_SAMPLE_DATASET_ENV = "GEOMETRY_API_REQUIRE_SAMPLE_DATASET"
+MISSING_DATASET_MARKER = "sample dataset missing"
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Say out loud when the real-data tests were skipped.
+
+    A skipped test is a green run with a hole in it. Locally that is the right trade — you can
+    work without a 9 MB download — but it should never be quiet about which coverage is absent.
+    """
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if MISSING_DATASET_MARKER in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "real dataset not verified", yellow=True, bold=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} test(s) skipped because {SAMPLE_DATASET_PATH} is missing — the "
+        "81-province build, point coverage, uint16 ceiling and determinism checks did NOT run."
+    )
+    terminalreporter.write_line("Run: python scripts/fetch_sample_dataset.py")
 
 
 @pytest.fixture(scope="session")
