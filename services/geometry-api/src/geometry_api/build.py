@@ -25,11 +25,10 @@ from typing import Any
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
 from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
 from .projection import Origin, ProjectionError, project_geometry
+from .simplify import LOD_HIGH, LOD_LEVELS, SimplifyError, SimplifyResult, simplify_dataset
 from .triangulate import GeometryLoss, TriangulationError, triangulate
 
-LOD_HIGH = "high"
-AVAILABLE_LODS = (LOD_HIGH,)
-"""Phase 2 adds ``medium`` and ``low``; the flag exists now so the output layout does not move."""
+AVAILABLE_LODS = LOD_LEVELS
 
 PROJECTION_NAME = "webmercator-local-meters"
 MANIFEST_FILENAME = "index.json"
@@ -153,7 +152,12 @@ def build_meshes(
     return entries
 
 
-def build_manifest(dataset: Dataset, entries: Sequence[MeshEntry], lod: str) -> dict[str, Any]:
+def build_manifest(
+    dataset: Dataset,
+    entries: Sequence[MeshEntry],
+    lod: str,
+    simplification: SimplifyResult | None = None,
+) -> dict[str, Any]:
     origin = Origin(lon=dataset.origin_lon, lat=dataset.origin_lat)
     min_x = min(entry.bounds_local[0] for entry in entries)
     min_y = min(entry.bounds_local[1] for entry in entries)
@@ -189,6 +193,9 @@ def build_manifest(dataset: Dataset, entries: Sequence[MeshEntry], lod: str) -> 
             "repairedTerritories": sum(1 for entry in entries if entry.territory.repaired),
         },
         "lossy": any(entry.is_lossy for entry in entries),
+        # What simplification dropped, kept apart from what triangulation dropped. Merging the
+        # two would hide which stage lost a part, and only one of them is supposed to.
+        "simplification": simplification.as_manifest_dict() if simplification else None,
         "sourceMetadata": dict(dataset.metadata),
         "territories": [entry.as_manifest_entry() for entry in entries],
     }
@@ -236,6 +243,39 @@ def _unique_filename(territory_id: str, used: dict[str, str]) -> str:
         candidate = f"{stem}-{suffix}"
     used[candidate.casefold()] = territory_id
     return candidate + MESH_SUFFIX
+
+
+def _check_simplification(result: SimplifyResult, allow_lossy: bool) -> None:
+    """At ``high`` simplification must not drop anything; lower levels drop detail on purpose.
+
+    Same gate as the triangulation one, applied one stage earlier. ``high`` is the level that
+    claims to still be the source geometry, so a part or hole lost here is a build failure
+    rather than a line in the manifest nobody reads.
+    """
+    if result.lod != LOD_HIGH or not result.loss.is_lossy or allow_lossy:
+        return
+    raise BuildError(
+        f"simplification at lod '{LOD_HIGH}' (tolerance {result.tolerance}) lost "
+        f"{result.loss.describe()}, but that level is supposed to preserve the source. "
+        f"Re-run with --allow-lossy to accept it, or lower the tolerance."
+    )
+
+
+def _print_simplification(result: SimplifyResult, stream: Any) -> None:
+    print(
+        f"lod '{result.lod}' (tolerance {result.tolerance}): "
+        f"{result.source_vertex_count} → {result.vertex_count} vertices "
+        f"({result.vertex_ratio:.1%} of source), parts "
+        f"{result.source_part_count} → {result.part_count}, holes "
+        f"{result.source_hole_count} → {result.hole_count}",
+        file=stream,
+    )
+    if result.loss.is_lossy:
+        print(
+            f"  simplification dropped {result.loss.describe()} (recorded in "
+            f"{MANIFEST_FILENAME} under 'simplification')",
+            file=stream,
+        )
 
 
 def _print_report(entries: Sequence[MeshEntry], manifest: dict[str, Any], stream: Any) -> None:
@@ -321,16 +361,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     on_invalid: InvalidGeometryPolicy = "repair" if args.repair_invalid else "reject"
     try:
         dataset = load_dataset(args.input, on_invalid=on_invalid)
-        entries = build_meshes(dataset, lod=args.lod, allow_lossy=args.allow_lossy)
-    except (DatasetError, BuildError) as exc:
+        simplification = simplify_dataset(dataset, args.lod)
+        _check_simplification(simplification, allow_lossy=args.allow_lossy)
+        entries = build_meshes(simplification.dataset, lod=args.lod, allow_lossy=args.allow_lossy)
+    except (DatasetError, BuildError, SimplifyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    manifest = build_manifest(dataset, entries, args.lod)
+    manifest = build_manifest(dataset, entries, args.lod, simplification)
     write_build(args.output, entries, manifest, clean=args.clean)
 
     if not args.quiet:
         _print_report(entries, manifest, sys.stdout)
+        _print_simplification(simplification, sys.stdout)
     _print_index_warnings(entries, sys.stderr)
     _print_loss_warnings(entries, sys.stdout)
     print(f"wrote {len(entries)} meshes and {MANIFEST_FILENAME} to {args.output}")

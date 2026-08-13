@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 from conftest import SAMPLE_DATASET_PATH
+from shapely.geometry import shape
 
 from geometry_api.build import (
     MANIFEST_FILENAME,
     UINT16_WARNING_RATIO,
     BuildError,
+    MeshEntry,
+    _print_index_warnings,
     build_manifest,
     build_meshes,
     main,
 )
 from geometry_api.encoding import UINT16_MAX_VERTEX_COUNT, decode_tkms
-from geometry_api.loader import Dataset, load_document
+from geometry_api.loader import Dataset, Territory, load_document
 
 
 def _square(min_lon: float, min_lat: float, size: float) -> dict:
@@ -57,8 +61,18 @@ def test_builds_every_province(sample_dataset: Dataset, tmp_path: Path) -> None:
     manifest = _read_manifest(tmp_path)
     assert manifest["territoryCount"] == 81
     assert len(list(tmp_path.glob("*.tkms"))) == 81
-    assert manifest["totals"]["vertices"] == 365_481
-    assert manifest["totals"]["triangles"] == 364_057
+    # Phase 2 simplifies at 'high' too (tolerance 5e-05), so these are below the 365_481 /
+    # 364_057 the unsimplified phase 1 pipeline produced. What makes 'high' still the level
+    # that preserves the source is the assertion below, not the vertex count.
+    assert manifest["totals"]["vertices"] == 240_423
+    assert manifest["totals"]["triangles"] == 238_999
+
+    simplification = manifest["simplification"]
+    assert simplification["lod"] == "high"
+    assert simplification["partCount"] == simplification["sourcePartCount"] == 712
+    assert simplification["holeCount"] == simplification["sourceHoleCount"] == 0
+    assert simplification["skippedParts"] == simplification["skippedRings"] == 0
+    assert manifest["lossy"] is False
 
 
 def test_output_is_byte_identical_across_runs(sample_dataset: Dataset, tmp_path: Path) -> None:
@@ -120,16 +134,49 @@ def test_manifest_records_the_origin_and_attribution(
     )
 
 
-def test_warns_when_a_mesh_approaches_the_uint16_ceiling(
+def test_simplification_moves_the_largest_mesh_off_the_uint16_ceiling(
     sample_dataset: Dataset, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["--input", str(SAMPLE_DATASET_PATH), "--output", str(tmp_path), "--quiet"]) == 0
-    warnings = [line for line in capsys.readouterr().err.splitlines() if "uint16" in line]
+    """Phase 1 left Muğla at 92.3% of the uint16 index space with 5057 vertices of headroom.
 
-    assert len(warnings) == 1, "Mugla is the only province near the ceiling"
-    assert "Muğla" in warnings[0]
-    assert "5057 vertices of headroom" in warnings[0]
-    assert UINT16_WARNING_RATIO < 60_478 / UINT16_MAX_VERTEX_COUNT < 1.0
+    Simplifying at 'high' is what removed that risk, so this asserts the headroom rather than
+    the warning: no province is near the ceiling any more, and none needs uint32 indices.
+    """
+    assert main(["--input", str(SAMPLE_DATASET_PATH), "--output", str(tmp_path), "--quiet"]) == 0
+    assert [line for line in capsys.readouterr().err.splitlines() if "uint16" in line] == []
+
+    manifest = _read_manifest(tmp_path)
+    largest = max(manifest["territories"], key=lambda entry: entry["vertexCount"])
+    assert largest["name"] == "Muğla"
+    assert largest["vertexCount"] == 34_466
+    assert largest["vertexCount"] / UINT16_MAX_VERTEX_COUNT < UINT16_WARNING_RATIO
+    assert all(entry["indexFormat"] == "uint16" for entry in manifest["territories"])
+
+
+def test_still_warns_when_a_mesh_does_approach_the_uint16_ceiling(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No province trips the warning any more, so prove the warning itself still works.
+
+    Without this, the check above would keep passing if the warning were deleted outright.
+    """
+    near_ceiling = int(UINT16_MAX_VERTEX_COUNT * UINT16_WARNING_RATIO) + 1
+    entry = MeshEntry(
+        territory=Territory(id="crowded", name="Crowded", geometry=shape(_square(32.0, 39.0, 1.0))),
+        filename="crowded.tkms",
+        payload=b"",
+        vertex_count=near_ceiling,
+        triangle_count=1,
+        part_count=1,
+        bounds_local=(0.0, 0.0, 1.0, 1.0),
+        uses_uint32_indices=False,
+    )
+
+    _print_index_warnings([entry], sys.stderr)
+    warning = capsys.readouterr().err
+
+    assert "Crowded" in warning
+    assert f"{UINT16_MAX_VERTEX_COUNT - near_ceiling} vertices of headroom" in warning
 
 
 def test_territorykit_ids_become_safe_filenames(territorykit_dataset: Dataset) -> None:
