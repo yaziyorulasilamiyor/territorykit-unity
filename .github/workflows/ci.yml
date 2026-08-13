@@ -29,8 +29,8 @@ jobs:
 
       - name: Lint (ruff)
         run: |
-          ruff check .
-          ruff format --check .
+          ruff check . ../../scripts
+          ruff format --check . ../../scripts
 
       - name: Type check (mypy)
         run: mypy src/
@@ -42,3 +42,47 @@ jobs:
         env:
           GEOMETRY_API_REQUIRE_SAMPLE_DATASET: "1"
         run: pytest -q --cov=geometry_api
+
+  lod-chain:
+    # The LOD chain runs the TerritoryKit CLI out of the submodule, so it needs Node as well as
+    # Python. Kept as its own job so a Node problem cannot be mistaken for a geometry failure.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          # vendor/territorykit requires >=22; pnpm comes from its packageManager pin via corepack.
+          node-version: "22"
+
+      - name: Install Python dependencies
+        working-directory: services/geometry-api
+        run: pip install -e ".[dev]"
+
+      - name: Fetch sample dataset
+        run: python scripts/fetch_sample_dataset.py
+
+      - name: Build the TerritoryKit CLI
+        working-directory: vendor/territorykit
+        run: |
+          corepack enable pnpm
+          # pnpm blocks @scarf/scarf's (telemetry) install script and turns that into exit 1.
+          # The script stays blocked either way; this only stops it failing the build.
+          pnpm config set strict-dep-builds false --location=global
+          pnpm install --frozen-lockfile
+          pnpm --filter "@territory-kit/cli..." build
+
+      - name: Build all three detail levels
+        run: |
+          python scripts/build_lod.py \
+            --input services/geometry-api/data/datasets/turkey-provinces.geojson \
+            --output "$RUNNER_TEMP/lod" --clean
+
+      - name: Check the level ladder
+        run: python scripts/check_lod_report.py "$RUNNER_TEMP/lod/lod-report.json"
