@@ -14,11 +14,13 @@ from conftest import MeshCase
 from helpers import count_containing_triangles, random_points_inside, triangle_signed_areas
 from shapely.geometry import LineString, Polygon
 
-from geometry_api.loader import Dataset
+from geometry_api.loader import Dataset, load_dataset
 from geometry_api.projection import Origin, project_geometry
 from geometry_api.triangulate import (
     DEGENERATE_AREA_EPSILON_M2,
+    GeometryLoss,
     TriangulationError,
+    quantize_to_storage_precision,
     signed_area,
     triangulate,
 )
@@ -141,7 +143,7 @@ def test_float32_quantization_barely_moves_the_polygon(sample_meshes: list[MeshC
 
 
 def test_no_degenerate_triangles(sample_meshes: list[MeshCase]) -> None:
-    total_dropped = sum(case.mesh.dropped_degenerate_triangles for case in sample_meshes)
+    total_dropped = sum(case.mesh.loss.degenerate_triangles for case in sample_meshes)
     assert total_dropped == 0, (
         f"earcut emitted {total_dropped} zero-area triangles on the real dataset; "
         "they were dropped, but the count is supposed to stay at zero"
@@ -149,6 +151,68 @@ def test_no_degenerate_triangles(sample_meshes: list[MeshCase]) -> None:
     for case in sample_meshes:
         areas = np.abs(triangle_signed_areas(case.mesh.vertices, case.mesh.indices))
         assert areas.min() > DEGENERATE_AREA_EPSILON_M2, case.name
+
+
+def test_a_hole_that_goes_collinear_is_reported_not_swallowed(fixtures_dir) -> None:
+    """The zero-area ring check, on a case the older length check could not have caught.
+
+    The hole keeps three distinct points after duplicate removal — so `len(ring) < 3` passes —
+    but its vertices land on one line once snapped to float32. Without the area check it would
+    reach earcut, contribute nothing, and be filled in silently.
+    """
+    dataset = load_dataset(fixtures_dir / "collapsing-hole.geojson")
+    origin = Origin(lon=dataset.origin_lon, lat=dataset.origin_lat)
+    projected = project_geometry(dataset.territories[0].geometry, origin)
+
+    ring = np.asarray(projected.interiors[0].coords)[:-1, :2]
+    snapped = quantize_to_storage_precision(ring)
+    deduplicated = snapped[np.any(snapped != np.roll(snapped, -1, axis=0), axis=1)]
+    assert len(deduplicated) >= 3, "the old length check would already have rejected this ring"
+    assert signed_area(deduplicated) == 0.0, "and the new check is what does reject it"
+    assert Polygon(projected.interiors[0]).area > 200, "a real 226 m2 hole, not a rounding artefact"
+
+    mesh = triangulate(projected)
+    assert mesh.loss.skipped_rings == 1
+    assert mesh.loss.is_lossy
+
+
+def test_a_part_whose_triangles_all_degenerate_is_reported_not_swallowed(fixtures_dir) -> None:
+    """The loss path that used to leak: the part was recorded before its triangles were dropped.
+
+    part_count claimed three parts, every loss counter read zero, and the third part was gone.
+    """
+    dataset = load_dataset(fixtures_dir / "vanishing-part.geojson")
+    origin = Origin(lon=dataset.origin_lon, lat=dataset.origin_lat)
+    projected = project_geometry(dataset.territories[0].geometry, origin)
+    assert len(projected.geoms) == 3, "three valid parts go in"
+
+    mesh = triangulate(projected)
+    assert mesh.part_count == 2, "part_count must describe the mesh, not the input"
+    assert mesh.loss.skipped_parts == 1
+    assert mesh.loss.degenerate_triangles > 0
+    assert mesh.loss.is_lossy
+
+
+def test_recorded_parts_always_carry_triangles(
+    sample_meshes: list[MeshCase], multipolygon_mesh: MeshCase
+) -> None:
+    """The invariant behind the accounting, checked from outside triangulate as well."""
+    for case in [multipolygon_mesh, *sample_meshes]:
+        triangles = case.mesh.indices.reshape(-1, 3)
+        for start, end in case.mesh.part_ranges:
+            inside = ((triangles >= start) & (triangles < end)).all(axis=1).sum()
+            assert inside > 0, f"{case.name}: a recorded part carries no triangles"
+
+
+def test_loss_structure_reports_every_field(fixtures_dir) -> None:
+    """One structure, one place: the manifest keys come from the loss object itself."""
+    assert GeometryLoss().is_lossy is False
+    assert GeometryLoss(degenerate_triangles=1).is_lossy is True
+    assert set(GeometryLoss().as_manifest_dict()) == {
+        "skippedParts",
+        "skippedRings",
+        "degenerateTriangles",
+    }
 
 
 def test_no_triangle_spans_two_parts(
@@ -172,8 +236,8 @@ def test_part_count_is_preserved(
     assert multipolygon_mesh.mesh.part_count == 3
     for case in sample_meshes:
         assert case.mesh.part_count == case.territory.part_count, case.name
-        assert case.mesh.skipped_parts == 0
-        assert case.mesh.skipped_rings == 0
+        assert case.mesh.loss.skipped_parts == 0
+        assert case.mesh.loss.skipped_rings == 0
 
     mugla = next(case for case in sample_meshes if case.territory.name == "Muğla")
     assert mugla.mesh.part_count == 256
@@ -276,7 +340,7 @@ def test_vertices_closer_than_float32_resolution_are_merged() -> None:
     )
     mesh = triangulate(near_duplicate)
     assert mesh.vertex_count == 4
-    assert mesh.dropped_degenerate_triangles == 0
+    assert mesh.loss.degenerate_triangles == 0
 
 
 def test_rejects_unsupported_geometry() -> None:

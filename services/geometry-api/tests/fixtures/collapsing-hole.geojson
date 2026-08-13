@@ -10,7 +10,7 @@
       "type": "Feature",
       "properties": {
         "id": "fixture-g",
-        "name": "Fixture G (valid hole too thin to survive float32)"
+        "name": "Fixture G (valid hole that goes collinear in float32)"
       },
       "geometry": {
         "type": "Polygon",
@@ -18,8 +18,7 @@
           [[25.0, 36.0], [45.0, 36.0], [45.0, 42.0], [25.0, 42.0], [25.0, 36.0]],
           [
             [40.0, 41.9],
-            [40.0, 41.90000001],
-            [44.5, 41.90000001],
+            [42.0, 41.90000001],
             [44.5, 41.9],
             [40.0, 41.9]
           ]
