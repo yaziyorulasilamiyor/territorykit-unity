@@ -56,19 +56,52 @@ class TriangulationError(ValueError):
 
 
 @dataclass(frozen=True)
+class GeometryLoss:
+    """Everything that did not survive the trip from source polygon to mesh.
+
+    One structure instead of a counter per cause, and ``skipped_parts`` is derived from the
+    *outcome* — parts that went in, minus parts that came out with triangles — rather than
+    incremented at each place a part can be dropped. A new way of losing a part is therefore
+    counted without anyone remembering to add a flag for it, which is exactly how the earlier
+    version leaked: triangles were removed after the part was already recorded as present, so a
+    part could be emptied while every counter still read zero.
+    """
+
+    skipped_parts: int = 0
+    skipped_rings: int = 0
+    degenerate_triangles: int = 0
+
+    @property
+    def is_lossy(self) -> bool:
+        return bool(self.skipped_parts or self.skipped_rings or self.degenerate_triangles)
+
+    def as_manifest_dict(self) -> dict[str, int]:
+        return {
+            "skippedParts": self.skipped_parts,
+            "skippedRings": self.skipped_rings,
+            "degenerateTriangles": self.degenerate_triangles,
+        }
+
+    def describe(self) -> str:
+        return (
+            f"{self.skipped_parts} part(s), {self.skipped_rings} hole(s) and "
+            f"{self.degenerate_triangles} degenerate triangle(s)"
+        )
+
+
+@dataclass(frozen=True)
 class TriangulatedMesh:
     """Triangles in local metres. Vertices stay float64 here; ``encoding.py`` casts to float32.
 
     ``part_ranges`` records the half-open vertex range each MultiPolygon part occupies, which is
-    what lets the tests prove no triangle spans two parts.
+    what lets the tests prove no triangle spans two parts. Only parts that actually reached the
+    mesh appear there, so ``part_count`` never claims a part the triangles do not back up.
     """
 
     vertices: NDArray[np.float64]
     indices: NDArray[np.uint32]
     part_ranges: tuple[tuple[int, int], ...]
-    dropped_degenerate_triangles: int = 0
-    skipped_rings: int = 0
-    skipped_parts: int = 0
+    loss: GeometryLoss = GeometryLoss()
 
     @property
     def vertex_count(self) -> int:
@@ -100,19 +133,21 @@ def triangulate(geometry: BaseGeometry) -> TriangulatedMesh:
     part_ranges: list[tuple[int, int]] = []
     vertex_offset = 0
     skipped_rings = 0
-    skipped_parts = 0
+    degenerate_triangles = 0
 
     for part in parts:
         prepared = _prepare_part(part)
         if prepared is None:
-            skipped_parts += 1
             continue
         vertices, ring_ends, part_skipped_rings = prepared
         skipped_rings += part_skipped_rings
 
         indices = mapbox_earcut.triangulate_float64(vertices, ring_ends)
+        # Degenerate triangles are removed here, per part, so a part that ends up with nothing
+        # is never recorded as present. Doing this after the merge left exactly that hole.
+        indices, dropped = _drop_degenerate_triangles(vertices, indices)
+        degenerate_triangles += dropped
         if indices.size == 0:
-            skipped_parts += 1
             continue
 
         part_vertices.append(vertices)
@@ -125,20 +160,31 @@ def triangulate(geometry: BaseGeometry) -> TriangulatedMesh:
     if not part_vertices:
         raise TriangulationError("triangulation produced no triangles")
 
-    merged_vertices = np.concatenate(part_vertices)
-    merged_indices = np.concatenate(part_indices)
-    merged_indices, dropped = _drop_degenerate_triangles(merged_vertices, merged_indices)
-    if merged_indices.size == 0:
-        raise TriangulationError("every triangle was degenerate")
-
-    return TriangulatedMesh(
-        vertices=merged_vertices,
-        indices=merged_indices,
+    mesh = TriangulatedMesh(
+        vertices=np.concatenate(part_vertices),
+        indices=np.concatenate(part_indices),
         part_ranges=tuple(part_ranges),
-        dropped_degenerate_triangles=dropped,
-        skipped_rings=skipped_rings,
-        skipped_parts=skipped_parts,
+        loss=GeometryLoss(
+            skipped_parts=len(parts) - len(part_ranges),
+            skipped_rings=skipped_rings,
+            degenerate_triangles=degenerate_triangles,
+        ),
     )
+    _check_every_part_carries_triangles(mesh)
+    return mesh
+
+
+def _check_every_part_carries_triangles(mesh: TriangulatedMesh) -> None:
+    """Guards the accounting itself: a recorded part with no triangles is a silent loss."""
+    starts = np.array([start for start, _ in mesh.part_ranges])
+    owners = np.searchsorted(starts, mesh.indices.reshape(-1, 3)[:, 0], side="right") - 1
+    counts = np.bincount(owners, minlength=len(mesh.part_ranges))
+    if np.any(counts == 0):
+        empty = int(np.count_nonzero(counts == 0))
+        raise TriangulationError(
+            f"internal invariant: {empty} recorded part(s) carry no triangles, so part_count "
+            "would over-report what the mesh contains"
+        )
 
 
 def signed_area(coords: NDArray[np.float64]) -> float:

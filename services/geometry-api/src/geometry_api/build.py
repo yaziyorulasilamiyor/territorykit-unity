@@ -25,7 +25,7 @@ from typing import Any
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
 from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
 from .projection import Origin, ProjectionError, project_geometry
-from .triangulate import TriangulationError, triangulate
+from .triangulate import GeometryLoss, TriangulationError, triangulate
 
 LOD_HIGH = "high"
 AVAILABLE_LODS = (LOD_HIGH,)
@@ -64,8 +64,7 @@ class MeshEntry:
     part_count: int
     bounds_local: tuple[float, float, float, float]
     uses_uint32_indices: bool
-    skipped_parts: int = 0
-    skipped_rings: int = 0
+    loss: GeometryLoss = GeometryLoss()
 
     @property
     def uint16_usage(self) -> float:
@@ -73,8 +72,8 @@ class MeshEntry:
 
     @property
     def is_lossy(self) -> bool:
-        """True when quantization dropped a part or a hole that the source geometry had."""
-        return bool(self.skipped_parts or self.skipped_rings)
+        """True when anything the source geometry had did not reach the mesh."""
+        return self.loss.is_lossy
 
     def as_manifest_entry(self) -> dict[str, Any]:
         return {
@@ -87,8 +86,7 @@ class MeshEntry:
             "indexFormat": "uint32" if self.uses_uint32_indices else "uint16",
             "byteLength": len(self.payload),
             "bboxLocal": list(self.bounds_local),
-            "skippedParts": self.skipped_parts,
-            "skippedRings": self.skipped_rings,
+            **self.loss.as_manifest_dict(),
             "repaired": self.territory.repaired,
             "parentId": self.territory.parent_id,
             "neighborIds": list(self.territory.neighbor_ids),
@@ -132,8 +130,7 @@ def build_meshes(
                 part_count=mesh.part_count,
                 bounds_local=mesh.bounds,
                 uses_uint32_indices=mesh.vertex_count > UINT16_MAX_VERTEX_COUNT,
-                skipped_parts=mesh.skipped_parts,
-                skipped_rings=mesh.skipped_rings,
+                loss=mesh.loss,
             )
         )
 
@@ -145,8 +142,7 @@ def build_meshes(
     lossy = [entry for entry in entries if entry.is_lossy]
     if lossy and lod == LOD_HIGH and not allow_lossy:
         detail = "\n  ".join(
-            f"{entry.territory.id} ({entry.territory.name}): "
-            f"{entry.skipped_parts} part(s), {entry.skipped_rings} hole(s) lost"
+            f"{entry.territory.id} ({entry.territory.name}): {entry.loss.describe()} lost"
             for entry in lossy
         )
         raise BuildError(
@@ -184,8 +180,12 @@ def build_manifest(dataset: Dataset, entries: Sequence[MeshEntry], lod: str) -> 
             "vertices": sum(entry.vertex_count for entry in entries),
             "triangles": sum(entry.triangle_count for entry in entries),
             "bytes": sum(len(entry.payload) for entry in entries),
-            "skippedParts": sum(entry.skipped_parts for entry in entries),
-            "skippedRings": sum(entry.skipped_rings for entry in entries),
+            # Summed generically from the loss structure, so a new loss field reaches the
+            # manifest totals without a second place needing to learn about it.
+            **{
+                key: sum(entry.loss.as_manifest_dict()[key] for entry in entries)
+                for key in GeometryLoss().as_manifest_dict()
+            },
             "repairedTerritories": sum(1 for entry in entries if entry.territory.repaired),
         },
         "lossy": any(entry.is_lossy for entry in entries),
@@ -275,9 +275,8 @@ def _print_loss_warnings(entries: Sequence[MeshEntry], stream: Any) -> None:
     for entry in entries:
         if entry.is_lossy:
             print(
-                f"warning: {entry.territory.name} lost {entry.skipped_parts} part(s) and "
-                f"{entry.skipped_rings} hole(s) to float32 quantization — they are too small to "
-                f"survive the storage grid (recorded in {MANIFEST_FILENAME})",
+                f"warning: {entry.territory.name} lost {entry.loss.describe()} — too small to "
+                f"survive the float32 storage grid (recorded in {MANIFEST_FILENAME})",
                 file=stream,
             )
         if entry.territory.repaired:
