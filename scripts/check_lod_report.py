@@ -22,6 +22,21 @@ LOD_LEVELS = ("high", "medium", "low")
 LOW_VERTEX_BUDGET = 0.25
 """'low' may keep at most a quarter of 'high' vertices."""
 
+MAX_DROPPED_PART_AREA = 10_000.0
+"""Mirrors geometry_api.simplify.DEFAULT_MAX_DROPPED_PART_AREA.
+
+Deliberately duplicated rather than imported: this script checks a report produced by some other
+run, possibly an older build, so it must state the contract it is checking against instead of
+reading whatever the current code happens to allow.
+"""
+
+MAX_NORMALIZATION_DROPS = 20
+"""Islets plus interior rings the geoBoundaries normalization may drop before CI objects.
+
+TUR ADM1 drops 7. The ceiling is not the observed number, so a routine data refresh does not
+turn CI red, but a change that starts discarding whole regions does.
+"""
+
 
 def check(report: dict[str, Any]) -> list[str]:
     """Return a list of failures; empty means the report satisfies the contract."""
@@ -66,6 +81,45 @@ def check(report: dict[str, Any]) -> list[str]:
             )
         if levels[lod]["triangles"] <= 0:
             failures.append(f"{lod} produced no triangles")
+        if simplification.get("largestDroppedPartArea", 0.0) > MAX_DROPPED_PART_AREA:
+            failures.append(
+                f"{lod} dropped a part of "
+                f"{simplification['largestDroppedPartArea']:.0f} m², over the "
+                f"{MAX_DROPPED_PART_AREA:.0f} m² limit"
+            )
+
+    failures.extend(_check_normalization(report.get("normalization"), levels))
+    return failures
+
+
+def _check_normalization(normalization: dict[str, Any] | None, levels: dict[str, Any]) -> list[str]:
+    """The normalization step drops real geometry, so its numbers get checked too.
+
+    Nothing here looked at this block before, which meant the seven islets the chain removes from
+    the source could have become seventy without the CI run noticing.
+    """
+    if normalization is None:
+        return ["report has no 'normalization' block; the chain did not record what it dropped"]
+
+    failures: list[str] = []
+    dropped = normalization.get("droppedParts", 0) + normalization.get("droppedHoles", 0)
+
+    if dropped > MAX_NORMALIZATION_DROPS:
+        failures.append(
+            f"normalization dropped {dropped} geometries, over the expected ceiling of "
+            f"{MAX_NORMALIZATION_DROPS}; the source data or the area floor changed"
+        )
+    if dropped and not normalization.get("lossy"):
+        failures.append("normalization dropped geometry but did not report itself as lossy")
+
+    # A lossy normalization must reach every level's manifest, or a consumer reading one level
+    # would be told nothing was lost.
+    if normalization.get("lossy"):
+        silent = [lod for lod in LOD_LEVELS if not levels[lod].get("lossy")]
+        if silent:
+            failures.append(
+                f"normalization was lossy but these levels report lossy=false: {', '.join(silent)}"
+            )
 
     return failures
 

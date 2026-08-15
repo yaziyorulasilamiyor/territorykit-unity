@@ -18,9 +18,9 @@ rather than in anything this project does:
 * ``properties.shapeGroup`` holds an ISO alpha-3 code (``TUR``) and the importer requires
   alpha-2, so every feature fails with ``SOURCE_COUNTRY_MISMATCH`` — 81 of 81 here. The
   importer's own example command hits this.
-* Seven rings in Muğla and İstanbul are real islets of roughly 10-20 m² that fall under the
-  importer's 1e-9 deg² area floor, and it rejects them as ``GEOMETRY_RING_ZERO_AREA`` with
-  ``repairable: false``, which stops the whole import.
+* Seven rings in Muğla and İstanbul are real islets — 2.0 to 6.1 m² in this project's local
+  projection — that fall under the importer's 1e-9 deg² area floor, and it rejects them as
+  ``GEOMETRY_RING_ZERO_AREA`` with ``repairable: false``, which stops the whole import.
 
 Both fixes are applied to a copy; the source file is never modified. Every dropped part is
 counted and printed, and lands in ``lod-report.json`` — an islet disappearing is a real change
@@ -38,7 +38,7 @@ import json
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,19 @@ class Normalization:
     country_codes_rewritten: int
     dropped_parts: int
     dropped_part_details: list[str]
+    dropped_holes: int = 0
+    dropped_hole_details: list[str] = field(default_factory=list)
+    """Interior rings below the area floor.
+
+    Zero on this dataset — geoBoundaries TUR ADM1 has no holes at all — but the filter that
+    removes them ran without counting them, which is the same silent-loss shape phase 1 spent two
+    review rounds closing. Counted here so the day a dataset with enclaves arrives, the number
+    exists before anyone has to go looking for it.
+    """
+
+    @property
+    def is_lossy(self) -> bool:
+        return bool(self.dropped_parts or self.dropped_holes)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +91,9 @@ class Normalization:
             "countryCodesRewritten": self.country_codes_rewritten,
             "droppedParts": self.dropped_parts,
             "droppedPartDetails": self.dropped_part_details,
+            "droppedHoles": self.dropped_holes,
+            "droppedHoleDetails": self.dropped_hole_details,
+            "lossy": self.is_lossy,
         }
 
 
@@ -120,6 +136,8 @@ def normalize_geoboundaries(source: Path, destination: Path, country: str) -> No
     rewritten = 0
     dropped = 0
     details: list[str] = []
+    dropped_holes = 0
+    hole_details: list[str] = []
 
     for feature in features:
         properties = feature.setdefault("properties", {})
@@ -142,7 +160,14 @@ def normalize_geoboundaries(source: Path, destination: Path, country: str) -> No
                 dropped += 1
                 details.append(f"{name}: islet of {_ring_area(part[0]):.2e} deg^2")
                 continue
-            holes = [ring for ring in part[1:] if _ring_area(ring) > RING_AREA_FLOOR]
+            holes = []
+            for ring in part[1:]:
+                ring_area = _ring_area(ring)
+                if ring_area > RING_AREA_FLOOR:
+                    holes.append(ring)
+                else:
+                    dropped_holes += 1
+                    hole_details.append(f"{name}: interior ring of {ring_area:.2e} deg^2")
             kept.append([part[0]] + holes)
 
         if not kept:
@@ -163,6 +188,8 @@ def normalize_geoboundaries(source: Path, destination: Path, country: str) -> No
         country_codes_rewritten=rewritten,
         dropped_parts=dropped,
         dropped_part_details=details,
+        dropped_holes=dropped_holes,
+        dropped_hole_details=hole_details,
     )
 
 
@@ -227,8 +254,12 @@ def import_dataset(normalized: Path, output: Path, country: str, level: str, dat
     return dataset
 
 
-def build_level(dataset: Path, output: Path, lod: str) -> dict[str, Any]:
-    """Run the geometry pipeline for one level and hand back its manifest."""
+def build_level(dataset: Path, output: Path, lod: str, upstream_loss: Path) -> dict[str, Any]:
+    """Run the geometry pipeline for one level and hand back its manifest.
+
+    ``upstream_loss`` carries the normalization losses forward, so each level's manifest accounts
+    for everything dropped on the way to it and not only for what its own two stages dropped.
+    """
     _run(
         [
             sys.executable,
@@ -240,6 +271,8 @@ def build_level(dataset: Path, output: Path, lod: str) -> dict[str, Any]:
             str(output),
             "--lod",
             lod,
+            "--upstream-loss",
+            str(upstream_loss),
             "--clean",
             "--quiet",
         ],
@@ -292,10 +325,19 @@ def main(argv: list[str] | None = None) -> int:
             f"normalized {normalization.feature_count} features "
             f"({normalization.country_codes_rewritten} country codes rewritten "
             f"{normalization.source_country_code!r} -> {normalization.country_code!r}, "
-            f"{normalization.dropped_parts} sub-threshold parts dropped)"
+            f"{normalization.dropped_parts} sub-threshold parts and "
+            f"{normalization.dropped_holes} interior rings dropped)"
         )
-        for detail in normalization.dropped_part_details:
+        for detail in normalization.dropped_part_details + normalization.dropped_hole_details:
             print(f"  dropped {detail}")
+
+        # Written before the builds so each level can fold it into its own manifest.
+        upstream_loss_path = args.output / "upstream-loss.json"
+        upstream_loss_path.write_text(
+            json.dumps(normalization.as_dict(), indent=2, sort_keys=True, ensure_ascii=False)
+            + "\n",
+            encoding="utf-8",
+        )
 
         dataset = import_dataset(
             normalized, dataset_dir, args.country, args.admin_level, args.build_date
@@ -304,13 +346,14 @@ def main(argv: list[str] | None = None) -> int:
 
         levels: dict[str, Any] = {}
         for lod in LOD_LEVELS:
-            manifest = build_level(dataset, args.output / lod, lod)
+            manifest = build_level(dataset, args.output / lod, lod, upstream_loss_path)
             levels[lod] = {
                 "territoryCount": manifest["territoryCount"],
                 "vertices": manifest["totals"]["vertices"],
                 "triangles": manifest["totals"]["triangles"],
                 "bytes": manifest["totals"]["bytes"],
                 "simplification": manifest["simplification"],
+                "lossy": manifest["lossy"],
             }
             print(
                 f"built lod '{lod}': {manifest['totals']['vertices']} vertices, "
