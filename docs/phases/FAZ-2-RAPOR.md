@@ -1,70 +1,70 @@
 # Faz 2 — LOD üretimi
 
-Tarih: 2026-08-13 · Durum: Tamamlandı (bir mimari sapmayla)
-Dal: feat/phase-2-lod-topology · Commit sayısı: 10
+Tarih: 2026-08-15 · Durum: Tamamlandı (bir mimari sapma + inceleme turu)
+Dal: feat/phase-2-lod-topology · Commit sayısı: 16
 
 ## Ne yapıldı
-- TerritoryKit CLI build edildi, zincirde **kaldı** (`import geoboundaries`) · `simplify.py` — topojson
-  ile **paylaşılan arc** üzerinden sadeleştirme (yer tutucu değil, bkz. Karar 2)
-- `build.py` — `--lod high|medium|low`, ayrı dizin; `high` kayıp kapısı bir aşama öne alındı ·
-  `scripts/build_lod.py` (tek komut, `--build-date` pinli) + `check_lod_report.py` (CI doğrulayıcısı)
+TerritoryKit CLI build edildi, zincirde **kaldı** (`import geoboundaries`). `simplify.py` topojson ile
+**paylaşılan arc** üzerinden sadeleştiriyor (Karar 2); `build.py` `--lod` alıyor; `scripts/build_lod.py`
+zinciri tek komuta indiriyor, `check_lod_report.py` CI'da denetliyor.
 
 ## Nasıl doğrulandı
-| Kontrol | Sonuç |
-|---|---|
-| `ruff` + `mypy` + `pytest --cov` | Temiz · **154 geçti**, kapsam **%96** |
-| **Çatlak (üçgenleme + float32 SONRASI, 3 seviye)** | boşluk **tam 0,0** · çakışma **tam 0,0** |
-| Paylaşılan vertex bit-eşitliği · kapsama | üç seviyede geçti · 81×50 noktanın hepsi **tam 1** üçgende |
-| Vertex azalması (`low` ≤ high'ın %25'i) · determinizm | **%12,8** · üç seviyede byte-identik |
-| Topoloji: bölge sayısı · uydurulan delik | 81 sabit · **0** (kaynakta da 0) |
+`ruff` + `mypy` temiz, **157 test geçti**, kapsam **%95**. **Çatlak testi (üçgenleme + float32 SONRASI,
+üç seviyede): boşluk tam 0,0 · çakışma tam 0,0.** Paylaşılan vertex bit-eşitliği ve kapsama (81×50
+noktanın hepsi **tam 1** üçgende) üç seviyede geçti; determinizm byte-identik; delik **0**.
 
-| Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik | Kayıp |
-|---|---|---|---|---|---|---|---|
-| kaynak | 366.157 | — | — | — | 705 | 0 | — |
-| high | 240.379 | %100 | 238.969 | 3.359.438 | 705 | 0 | **yok** |
-| medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 | 1 parça |
-| low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 | 20 parça, 19 halka |
+| Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik |
+|---|---|---|---|---|---|---|
+| kaynak | 366.157 | — | — | — | 705 | 0 |
+| high | 240.379 | %100 | 238.969 | 3.359.438 | 705 | 0 |
+| medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 |
+| low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 |
 
 Çatlağın **tam sıfır** olması tolerans değil zorunluluk: sadeleştirme paylaşılan arc üzerinde çalıştığı
-için sınırın iki yanı **aynı sayılar**; sıfırdan büyük her değer zincirin kırıldığını gösterir.
+için sınırın iki yanı **aynı sayılar**; sıfırdan büyüğü zincirin kırıldığını gösterir.
 
 ## Kararlar ve gerekçeleri
 1. **Sadeleştirme TerritoryKit yerine topojson** — talimat `--strategy topology-safe` şart koşuyordu;
-   strateji **önce denendi, sonra ölçüldü** ve topolojiyi korumuyor: her ring'i bağımsız
-   Douglas-Peucker'dan geçiriyor, kendi `topologyAudit`'i `low`'da 57.978 segmentin 48.204'ünün
-   bozulduğunu yazıyor, komut yine 0 dönüyor. Geometrik ölçüm: 197 komşu çiftinin **163'ünde** çatlak,
-   63 km² boşluk, tek çiftte 2,03 km²'ye kadar. topojson aynı toleranslarda hem daha az vertex hem
-   **0 çatlak**. Kullanıcı onayıyla geçildi. Alternatifler: kendi arc grafiğim (yasak ve gereksiz),
-   TerritoryKit'i düzeltmek (`vendor/`'a dokunma kuralıyla çelişiyor).
+   strateji **önce denendi, sonra ölçüldü**: her ring'i bağımsız Douglas-Peucker'dan geçiriyor. Kanıt
+   `high` çıktısı — 81 geometrinin **hepsi geçerli**, onarım gerekmiyor: 197 komşu çiftinin **32'sinde**
+   çatlak, 0,0061 km² boşluk + 0,0189 km² çakışma (kaynakta sıfır). `low` daha kötü (161 çift, 57,86
+   km²) ama çıktısında **23 geçersiz geometri** var. topojson: daha az vertex, **0 çatlak**.
 2. **`simplify.py` yer tutucu kalmadı** — o madde sadeleştirmeyi TerritoryKit'in yapması varsayımına
-   dayanıyordu; varsayım düşünce modül Faz 0 düzeninde kendisine ayrılan işi yapıyor.
-3. **`high` artık sadeleştiriliyor (5e-05)** — 365.481 → 240.379 vertex. "Kaynağı korur" iddiası vertex
-   sayısıyla değil **ölçümle** tanımlı: 705 parça ve 0 delik girip aynısı çıkıyor, kayıp sıfır, build
-   kapısı zorluyor. Yan kazanç: Muğla uint16 tavanının %92,3'ünden %52,6'sına indi.
+   dayanıyordu; varsayım düşünce modül kendisine ayrılan işi yapıyor.
+3. **`high` artık sadeleştiriliyor (5e-05)** — 365.481 → 240.379 vertex; "kaynağı korur" iddiası
+   **ölçümle** tanımlı (705 parça, 0 delik, kayıp sıfır). Muğla uint16 payı %92,3 → %52,6.
+
+## İnceleme düzeltmeleri
+**U1 — geri çekilen iddia.** "48.204 bozuk segment" aslında `sharedSegmentCount` farkı ve **doğru
+çalışan** sadeleştiricide de yüksek çıkıyor: **0 çatlak üreten topojson aynı formülde 47.357** alıyor
+(doğrulandı). İddia kaldırıldı; metriğin işe yaramaması artık Issue B'nin konusu, A'nın kanıtı değil.
+**U2 — düzeltilen sayı.** 63 km² şişmişti: TK'nın medium/low çıktısındaki 20/23 geçersiz geometri
+onarılınca oluşan iç delikler boşluğa karışıyordu. Ayrıştırılınca low = **161/197, 57,86 km²**.
+**U3** iki issue oldu (A `high` ile açılıyor) · **P1a/P1b** üst `lossy` tüm kaynakları kapsıyor, silinen
+iç halkalar sayılıyor · **P2a-d** normalizasyon kaybı manifeste + CI'ya bağlandı, kayıp alan bazlı ve
+eşikli, adacık alanları ve test sınırları düzeltildi.
 
 ## Bilinen eksikler ve riskler
-- **geoBoundaries dosyaları importer'a olduğu gibi girmiyor.** İki ön-normalizasyon şart: `shapeGroup`
-  alpha-3 → alpha-2, ve 1e-9 deg² altındaki **7 gerçek adacık** (~10-20 m²) düşürülüyor. Sayılıyor ve
-  rapora yazılıyor ama **veriden çıkıyorlar**; kaynak dosya değişmiyor.
-  Ülke kodu `--country`'den alınıyor (alpha-3 kısaltılamaz: `TUR` → `TU`); importer'ın çapraz kontrolü
-  kaybolmadı, öne alındı — tüm feature'lar tek `shapeGroup` üzerinde anlaşmak zorunda.
-- `low`'da 19 sahte delik oluşup siliniyor. Silmek çatlak açamaz (paylaşılan sınırlar dış halkada), ama
-  **hiçbir toleransın hem %25 bütçesini hem sıfır sahte deliği sağlamadığı** ölçüldü — temizlik zorunlu.
-- Delik yolları fixture'lara dayanıyor (gerçek dataset'te delik yok). Docker doğrulanmadı (Faz 0
-  tıkanması). Yerel Python 3.14, hedef 3.12 → CI'da. topojson **1.10 zorunlu** (1.9, numpy 2'de
-  kaldırılan `np.in1d`'i çağırıyor).
+- **Çatlak testi eksiksiz değil.** Boşluk metriği yalnız **kapalı** boşlukları görür — ülke dış sınırına
+  açılan çatlak delik oluşturmaz; paylaşılan-vertex testi çift başına **en az bir** ortak vertex arar.
+  İl-il iç sınırlar (bozulmanın asıl yeri) yakalanıyor; kapatmak vertex dizisi karşılaştırması ister.
+- **geoBoundaries dosyaları importer'a olduğu gibi girmiyor.** `shapeGroup` alpha-3 → alpha-2, ve 1e-9
+  deg² altındaki **7 gerçek adacık** (yerel projeksiyonda **2,0–6,1 m²**) düşürülüyor — sayılıyor ve
+  her seviyenin manifestine giriyor, ama **veriden çıkıyorlar**.
+- **Parça sayısı düşüşü kayıp değil.** `low`'da sayı 20 azalıyor ama gerçekten **1** parça yok oluyor
+  (Artvin, 685 m²); kalan 19'u komşusuyla **birleşiyor**. Kayıp artık alan bazlı ve eşikli
+  (`--max-lost-area`, varsayılan 10.000 m²).
+- `low`'da sahte delikler oluşup siliniyor; **hiçbir toleransın hem %25 bütçesini hem sıfır sahte
+  deliği sağlamadığı** ölçüldü. Delik yolları fixture'lara dayanıyor; Docker doğrulanmadı (Faz 0);
+  yerel Python 3.14, hedef 3.12 → CI'da; topojson **1.10 zorunlu** (1.9 `np.in1d` çağırıyor).
 
 ## Tıkanmalar
-**Bir tane, çözüldü.** `topology-safe` fazın en kritik testini geçemiyordu. "Tıkanma kuralı" uyarınca
-kendi implementasyonuma **geçmedim**; ölçümleri sunup durdum ve sordum. Karar: topojson ile devam.
-Bulgu belgesi hazır, **henüz upstream'e gönderilmedi** — Faz 3 öncesi yapılacak.
+**Bir tane, çözüldü.** `topology-safe` en kritik testi geçemiyordu; kendi implementasyonuma **geçmedim**, ölçümleri sunup sordum. Issue A ve B hazır, **açılmadı**.
 
 ## Sonraki faza hazırlık
-Faz 3 önkoşulu **hazır**: üç seviye deterministik ve ayrı dizinlerde — "FastAPI istek başına geometri
-hesaplamaz" kuralının dayandığı artifact modeli yerinde.
+Faz 3 önkoşulu **hazır**: üç seviye deterministik, ayrı dizinlerde, önceden üretilmiş.
 
 ## Değişen dosyalar
-- `src/geometry_api/`: `simplify.py` (yeni), `build.py` · `tests/`: `test_lod.py` (yeni), `test_build.py`
-- `scripts/`: `build_lod.py`, `check_lod_report.py` (yeni) · `docs/`:
-  `territorykit-simplification-finding.md` (yeni), `PROJE-TALIMATI.md`, `REVIEWER-BRIEF.md`
-- `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `pyproject.toml`
+`src/geometry_api/`: `simplify.py` (yeni), `build.py` · `tests/test_lod.py` (yeni), `test_build.py` ·
+`scripts/`: `build_lod.py`, `check_lod_report.py` (yeni) · `docs/territorykit-simplification-finding.md`
+(yeni) · `ci.yml`, `README.md`, `CHANGELOG.md`, `pyproject.toml`
