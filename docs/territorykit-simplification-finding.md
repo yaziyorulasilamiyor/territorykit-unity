@@ -1,10 +1,13 @@
 # TerritoryKit bulguları — upstream'e açılacak iki issue
 
-Sürüm: `@territory-kit/cli` 1.4.0 · Submodule commit: `8ae8e6b` · Ölçüm tarihi: 2026-08-15
+Sürüm: `@territory-kit/cli` 1.4.0 · Submodule commit: `8ae8e6b` · Ölçüm tarihi: 2026-08-16
 Veri: geoBoundaries gbOpen TUR ADM1, 81 il
 
 Bu belge iki **ayrı** hatayı anlatır. Ayrı tutulmalarının sebebi farklı bileşenleri ilgilendirmeleri:
 biri sadeleştirme algoritması, diğeri onu denetlediğini iddia eden ölçüm.
+
+Bu belgedeki **her sayı tek bir komutla üretilir**; bkz. [Tekrar üretme](#tekrar-üretme). Aşağıda
+komut çıktısından kopyalanmayan bir sayı yoktur.
 
 > **Bu belgede bilerek kullanılmayan bir sayı var.** Önceki taslak "48.204 bozuk segment" diyordu.
 > O sayı `sharedSegmentCount(kaynak) − sharedSegmentCount(çıktı)` farkıdır ve **bozulmanın kanıtı
@@ -28,17 +31,19 @@ global şeklinden etkilendiği için farklı vertex alt kümeleri seçiyor.
 `make_valid`) gerekmiyor. Yani aşağıdaki sayılar ölçüm yönteminden değil, doğrudan
 TerritoryKit'in çıktısından geliyor.
 
-Faz 1'de tespit edilen 197 gerçek ortak sınırlı il çifti üzerinde, `--detail high` çıktısı:
+Kaynakta ortak sınırı olan 197 il çifti üzerinde, `--detail high` çıktısı:
 
 | Ölçüm | Kaynak | `high` çıktısı |
 |---|---|---|
 | Geçersiz geometri | 0 | **0** |
-| Boşluk olan çift | 0 | **15** / 197 |
-| Çakışma olan çift | 0 | **30** / 197 |
 | Etkilenen çift (boşluk ∪ çakışma) | 0 | **32** / 197 |
 | Toplam boşluk | 0 | **0,0061 km²** |
-| Toplam çakışma | 0 | **0,0189 km²** |
-| En kötü tek çift | 0 | 1.314 m² |
+| Toplam çakışma | 0 | **0,0187 km²** |
+| En kötü tek çift — **Gaziantep / Kilis** | 0 | **6.596,9 m² çakışma** |
+
+Gaziantep / Kilis çifti belgeye adıyla yazıldı çünkü 197 çiftin yalnız 32'si etkileniyor:
+"iki komşu seç ve kesişimlerine bak" talimatı çiftlerin %84'ünde hiçbir şey göstermez. Tekrar
+üretme betiği bu çifti varsayılan olarak ölçer, `--pair` ile başka bir çift verilebilir.
 
 Komşu poligonlar sadeleştirmeden önce sınırlarında **bit-eşit** vertex paylaşıyordu; sonra
 paylaşmıyorlar. Çakışma da boşluk kadar önemli: iki il aynı alanı iddia ediyor.
@@ -51,8 +56,8 @@ paylaşmıyorlar. Çakışma da boşluk kadar önemli: iki il aynı alanı iddia
 
 | Seviye | Geçersiz geometri | Etkilenen çift | Boşluk | Çakışma |
 |---|---|---|---|---|
-| medium | **20** | 95 / 197 | 1,39 km² | 1,55 km² |
-| low | **23** | 161 / 197 | 57,86 km² | 68,06 km² |
+| medium | **20** | 90 / 197 | 1,39 km² | 1,56 km² |
+| low | **23** | 161 / 197 | 58,09 km² | 68,24 km² |
 
 Geçersiz geometri üretmek başlı başına bir sorun; sadeleştirme sonrası `isValid` kontrolü yok.
 
@@ -60,29 +65,43 @@ Geçersiz geometri üretmek başlı başına bir sorun; sadeleştirme sonrası `
 
 Aynı toleranslarla (0,00005 / 0,0005 / 0,0025) `topojson` 1.10 — arc tabanlı bir sadeleştirici:
 
-| Seviye | Vertex (TK → topojson) | Etkilenen çift (TK → topojson) |
+| Seviye | Etkilenen çift (TK → topojson) | Geçersiz geometri (TK → topojson) |
 |---|---|---|
-| high | 241.329 → 241.084 | 32 → **0** |
-| medium | 88.023 → 86.586 | 95 → **0** |
-| low | 38.981 → 31.331 | 161 → **0** |
+| high | 32 → **0** | 0 → 0 |
+| medium | 90 → **0** | 20 → 5 |
+| low | 161 → **0** | 23 → 13 |
 
-topojson hem daha az vertex üretiyor hem hiç çatlak bırakmıyor. Fark maliyetten değil, algoritmanın
-ortak arc modelinden geliyor.
+**Dürüstlük notu:** topojson da `medium` ve `low`'da kendini kesen geometri üretiyor (5 ve 13).
+Fark onarıma ihtiyaç duyup duymamak değil; bu boru hattı onarıyor ve **sonrasında** çatlağın
+sıfır olduğunu üçgenlenmiş, float32'ye indirilmiş, decode edilmiş mesh üzerinde ölçüyor.
+`geometry simplify` ise 23 geçersiz geometriyi `ok: true` ve çıkış kodu 0 ile teslim ediyor.
+Sorun sadeleştiricinin kusursuz olmaması değil, kusurunu bildirmemesi.
 
 ### Tekrar üretme
 
 ```bash
 cd vendor/territorykit && corepack pnpm install
 corepack pnpm --filter "@territory-kit/cli..." build
-node packages/cli/dist/index.mjs import geoboundaries --country TR --admin-level ADM1 \
-  --input <geoBoundaries-TUR-ADM1.geojson> --output /tmp/tr-adm1 --force
-node packages/cli/dist/index.mjs geometry simplify /tmp/tr-adm1/dataset.json \
-  --strategy topology-safe --detail high --output /tmp/simplified --force
+cd ../..
+pip install -e services/geometry-api
+python scripts/fetch_sample_dataset.py
+python scripts/repro_territorykit_finding.py \
+  --input services/geometry-api/data/datasets/turkey-provinces.geojson \
+  --work /tmp/tk-repro
 ```
 
-Sonra `/tmp/simplified/high/dataset.json` içinde sınır paylaşan iki il alıp kesişimlerinin
-alanına bakmak yeterli — sıfır olmalı, değil. (Import'un çalışması için önce Issue A ekindeki
-normalizasyon gerekiyor; bkz. aşağısı.)
+Betik zinciri baştan sona kendisi çalıştırıyor: normalizasyon (aşağıdaki Ek olmadan import
+çalışmıyor), `territory import geoboundaries`, `territory geometry simplify` **üç seviyede**,
+aynı toleranslarla topojson, ve iki tarafın ölçümü. Tek seviye için `--detail high` /
+`--detail low`, etkilenen çiftlerin listesi için `--list-affected`.
+
+**Girdi kimliği.** Farklı sayı alan biri önce verinin aynı olup olmadığını görebilsin diye betik
+iki hash basıyor. Bu belgedeki sayılar şu ikisiyle üretildi:
+
+| Dosya | sha256 |
+|---|---|
+| Ham geoBoundaries TUR ADM1 | `d9d6fcb243e61684c2bd1dbe608b798732da1a4ce87a3635837a87c1930f1ba6` |
+| Normalize edilmiş kopya | `6fe9052a3a4eb60f956f1b34dbbef8215578925be0e54a5a43cf6ed7c1686189` |
 
 ---
 
@@ -102,17 +121,28 @@ kusursuz bir sadeleştiricide de yüksek çıkar.
 
 ### Kanıt
 
-Aynı formül, çatlak ürettiği ölçülen TerritoryKit çıktısına ve **hiç çatlak üretmediği ölçülen**
-topojson çıktısına uygulandığında:
+Aynı formül (kaynak: 57.978 ortak segment), çatlak ürettiği ölçülen TerritoryKit çıktısına ve
+**hiç çatlak üretmediği ölçülen** topojson çıktısına uygulandığında:
 
 | Seviye | TerritoryKit | topojson (0 çatlak) |
 |---|---|---|
 | high | 13.369 | 13.288 |
-| medium | 32.414 | 32.048 |
-| low | 48.204 | **47.357** |
+| medium | 32.414 | 32.049 |
+| low | **48.204** | **47.358** |
 
 Sayılar neredeyse aynı. Metrik doğru çıktıyla bozuk çıktıyı **ayırt etmiyor**, dolayısıyla
 bir topoloji denetimi olarak kullanılamaz.
+
+**Hangi aşamanın hangi sayıyı verdiği** (önceki taslak burayı yanlış adlandırıyordu): `low`
+seviyesinde ham topojson sadeleştirici çıktısı **47.357**; bu çıktının 13 geometrisi geçersiz.
+Onarılmış ve çatlağı sıfır olarak ölçülmüş **nihai boru hattı çıktısı 47.358** veriyor. İkisi
+arasındaki 1'lik fark önemsiz — önemli olan **her iki değerin de** TerritoryKit'in 48.204'üne
+yakın olması. Metrik, çatlak üreten çıktıyla üretmeyeni ayırt edemiyor.
+
+Küçük bir ek fark: TerritoryKit'in kendi raporu `low` için 48.204 yazıyor, aynı formül yazdığı
+`dataset.json` üzerinden yeniden hesaplandığında 48.200 çıkıyor. Fark JSON'a yazılırken oluşan
+yuvarlamadan geliyor; betik ikisini de basıyor ki bu 4'lük fark "tekrar üretilemedi" gibi
+okunmasın.
 
 ### İkinci sorun — sessiz başarı
 
@@ -125,6 +155,13 @@ bu, bozuk çıktının sessizce geçmesi demek.
 Gerçek denetim, sadeleştirme sonrası komşu çiftlerinin ortak sınırlarını karşılaştırmalı (ya da
 en azından `isValid` kontrolü yapmalı) ve uyumsuzluk bulunduğunda sıfırdan farklı çıkış kodu
 dönmeli.
+
+### Tekrar üretme
+
+Issue A ile aynı komut; `sharedBoundaryMismatchCount` satırları hem TerritoryKit hem topojson
+için, üç seviyede de basılıyor. Formülün Python karşılığı betikte
+`_shared_segment_count` içinde, `geometry-simplification.ts`'teki `collectSharedSegments` ile
+koordinat koordinat aynı (9 ondalık, yön bağımsız anahtar).
 
 ---
 
@@ -141,6 +178,9 @@ yayınladığı dosya olduğu gibi verildiğinde import 88 hatayla düşüyor, �
   1e-9 deg² eşiğinin altında kaldığı için import'u tümden durduruyor. Yerel metre projeksiyonunda
   ölçülen alanları: **2,0 – 6,1 m²**.
 
+Normalizasyon `scripts/build_lod.py:normalize_geoboundaries` içinde; tekrar üretme betiği aynı
+fonksiyonu çağırıyor, kaynak dosyayı değiştirmiyor ve düşürdüğü her parçayı sayıp yazdırıyor.
+
 ---
 
 ## Bu projedeki sonuç
@@ -149,4 +189,4 @@ Sadeleştirme `topojson`'a devredildi (`services/geometry-api/src/geometry_api/s
 TerritoryKit zincirden çıkmadı: dataset şeması ve `import geoboundaries` adımı hâlâ kullanılıyor.
 Değişen yalnızca ölçülerek çalışmadığı gösterilen adım.
 
-**Issue'lar henüz açılmadı** — onay bekliyor.
+**Issue'lar henüz açılmadı** — onay bekliyor. Tekrar üretme hazır ve çalışıyor.
