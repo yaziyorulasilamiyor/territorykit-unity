@@ -24,9 +24,11 @@ from typing import Any
 
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
 from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
+from .loss import derive_lossy
 from .projection import Origin, ProjectionError, project_geometry
 from .simplify import (
     DEFAULT_MAX_DROPPED_PART_AREA,
+    DEFAULT_MAX_TOTAL_DROPPED_AREA,
     LOD_HIGH,
     LOD_LEVELS,
     SimplifyError,
@@ -166,29 +168,40 @@ def collect_loss(
 ) -> dict[str, Any]:
     """Every way this build lost geometry, in one place, with one flag over all of them.
 
-    The top-level ``lossy`` used to mean "triangulation lost something", which quietly read as
-    "nothing was lost" on a level where simplification had reduced the part count by 20 and
-    normalization had dropped 7 islets. That is the phase 1 bug — a loss path with no counter —
-    arriving through a new door, so the flag is derived from the union of the sources rather than
-    maintained beside them. Adding a fourth source means adding it here, and the flag follows.
+    The flag comes from ``loss.derive_lossy`` reading the **records** of each stage — the counts,
+    the areas, the lists of what went missing. It does not read any stage's own ``lossy``
+    boolean, including the one an upstream JSON file supplies: two review rounds in a row found
+    this function trusting a boolean that disagreed with the numbers beside it.
+
+    Concretely, the two cases that used to slip through and now cannot:
+
+    * ``simplification`` recorded a 20.000 m² dropped part while its ``skippedParts`` counter
+      read 0. Asking ``simplification.loss.is_lossy`` said "nothing lost"; asking the records
+      finds ``droppedParts`` and ``droppedPartArea``.
+    * ``upstream`` arrived as ``{"droppedParts": 7, "lossy": false}`` and was taken at its word.
+      The boolean is now ignored on the way in and cross-checked by
+      ``scripts/check_lod_report.py`` on the way out, so a lying producer fails CI rather than
+      quietly relabelling seven dropped islets as nothing.
+
+    Adding a fourth loss source means adding it to ``sources`` with fields named by the
+    convention in ``loss.py``; the flag then follows without this function changing.
     """
     triangulation = {
         key: sum(entry.loss.as_manifest_dict()[key] for entry in entries)
         for key in GeometryLoss().as_manifest_dict()
     }
+    simplification_block = simplification.as_manifest_dict() if simplification else None
+    upstream_block = dict(upstream) if upstream else None
     sources: dict[str, Any] = {
         "triangulation": triangulation,
-        "simplification": simplification.as_manifest_dict() if simplification else None,
-        "upstream": dict(upstream) if upstream else None,
+        "simplification": simplification_block,
+        "upstream": upstream_block,
     }
 
-    lossy = any(triangulation.values())
-    if simplification is not None:
-        lossy = lossy or simplification.loss.is_lossy
-    if upstream:
-        lossy = lossy or bool(upstream.get("lossy"))
-
-    return {**sources, "lossy": lossy}
+    return {
+        **sources,
+        "lossy": derive_lossy(triangulation, simplification_block, upstream_block),
+    }
 
 
 def build_manifest(
@@ -295,12 +308,19 @@ def _check_simplification(result: SimplifyResult, allow_lossy: bool) -> None:
     Same gate as the triangulation one, applied one stage earlier. ``high`` is the level that
     claims to still be the source geometry, so a part or hole lost here is a build failure
     rather than a line in the manifest nobody reads.
+
+    Asks ``result.is_lossy``, not ``result.loss.is_lossy``: the latter sees only the three
+    counters, so a dropped part in a build whose part count happened to balance out would walk
+    straight through this gate.
     """
-    if result.lod != LOD_HIGH or not result.loss.is_lossy or allow_lossy:
+    if result.lod != LOD_HIGH or not result.is_lossy or allow_lossy:
         return
+    dropped = ""
+    if result.dropped_parts:
+        dropped = f" (including {result.dropped_area:.1f} m² of dropped parts)"
     raise BuildError(
         f"simplification at lod '{LOD_HIGH}' (tolerance {result.tolerance}) lost "
-        f"{result.loss.describe()}, but that level is supposed to preserve the source. "
+        f"{result.loss.describe()}{dropped}, but that level is supposed to preserve the source. "
         f"Re-run with --allow-lossy to accept it, or lower the tolerance."
     )
 
@@ -314,10 +334,16 @@ def _print_simplification(result: SimplifyResult, stream: Any) -> None:
         f"{result.source_hole_count} → {result.hole_count}",
         file=stream,
     )
-    if result.loss.is_lossy:
+    if result.merges or result.splits:
         print(
-            f"  simplification dropped {result.loss.describe()} (recorded in "
-            f"{MANIFEST_FILENAME} under 'simplification')",
+            f"  topology changed: {result.merges} part merge(s), {result.splits} split(s) — "
+            f"no area lost, but the component structure differs from the source",
+            file=stream,
+        )
+    if result.is_lossy:
+        print(
+            f"  simplification dropped {result.loss.describe()}, {result.dropped_area:.1f} m² "
+            f"in total (recorded in {MANIFEST_FILENAME} under 'simplification')",
             file=stream,
         )
 
@@ -408,6 +434,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"(default: {DEFAULT_MAX_DROPPED_PART_AREA:.0f}); 'inf' records losses without failing",
     )
     parser.add_argument(
+        "--max-total-lost-area",
+        type=float,
+        default=DEFAULT_MAX_TOTAL_DROPPED_AREA,
+        help=f"fail if simplification drops more than this many square metres in total across "
+        f"every part (default: {DEFAULT_MAX_TOTAL_DROPPED_AREA:.0f}); the per-part limit alone "
+        f"lets any number of sub-threshold parts through",
+    )
+    parser.add_argument(
         "--upstream-loss",
         type=Path,
         help="JSON describing geometry lost before this build (scripts/build_lod.py writes it "
@@ -429,7 +463,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         dataset = load_dataset(args.input, on_invalid=on_invalid)
         simplification = simplify_dataset(
-            dataset, args.lod, max_dropped_part_area=args.max_lost_area
+            dataset,
+            args.lod,
+            max_dropped_part_area=args.max_lost_area,
+            max_total_dropped_area=args.max_total_lost_area,
         )
         _check_simplification(simplification, allow_lossy=args.allow_lossy)
         entries = build_meshes(simplification.dataset, lod=args.lod, allow_lossy=args.allow_lossy)

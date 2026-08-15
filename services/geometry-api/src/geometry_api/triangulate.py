@@ -44,6 +44,8 @@ from numpy.typing import NDArray
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from .loss import records_show_loss
+
 MIN_RING_VERTICES = 3
 """A ring with fewer distinct vertices than this encloses no area."""
 
@@ -73,7 +75,8 @@ class GeometryLoss:
 
     @property
     def is_lossy(self) -> bool:
-        return bool(self.skipped_parts or self.skipped_rings or self.degenerate_triangles)
+        """Answered by ``loss.records_show_loss`` rather than here — see ``loss.py``."""
+        return records_show_loss(self.as_manifest_dict())
 
     def as_manifest_dict(self) -> dict[str, int]:
         return {
