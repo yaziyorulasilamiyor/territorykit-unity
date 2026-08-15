@@ -17,7 +17,7 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,14 @@ from typing import Any
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
 from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
 from .projection import Origin, ProjectionError, project_geometry
-from .simplify import LOD_HIGH, LOD_LEVELS, SimplifyError, SimplifyResult, simplify_dataset
+from .simplify import (
+    DEFAULT_MAX_DROPPED_PART_AREA,
+    LOD_HIGH,
+    LOD_LEVELS,
+    SimplifyError,
+    SimplifyResult,
+    simplify_dataset,
+)
 from .triangulate import GeometryLoss, TriangulationError, triangulate
 
 AVAILABLE_LODS = LOD_LEVELS
@@ -152,17 +159,51 @@ def build_meshes(
     return entries
 
 
+def collect_loss(
+    entries: Sequence[MeshEntry],
+    simplification: SimplifyResult | None,
+    upstream: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Every way this build lost geometry, in one place, with one flag over all of them.
+
+    The top-level ``lossy`` used to mean "triangulation lost something", which quietly read as
+    "nothing was lost" on a level where simplification had reduced the part count by 20 and
+    normalization had dropped 7 islets. That is the phase 1 bug — a loss path with no counter —
+    arriving through a new door, so the flag is derived from the union of the sources rather than
+    maintained beside them. Adding a fourth source means adding it here, and the flag follows.
+    """
+    triangulation = {
+        key: sum(entry.loss.as_manifest_dict()[key] for entry in entries)
+        for key in GeometryLoss().as_manifest_dict()
+    }
+    sources: dict[str, Any] = {
+        "triangulation": triangulation,
+        "simplification": simplification.as_manifest_dict() if simplification else None,
+        "upstream": dict(upstream) if upstream else None,
+    }
+
+    lossy = any(triangulation.values())
+    if simplification is not None:
+        lossy = lossy or simplification.loss.is_lossy
+    if upstream:
+        lossy = lossy or bool(upstream.get("lossy"))
+
+    return {**sources, "lossy": lossy}
+
+
 def build_manifest(
     dataset: Dataset,
     entries: Sequence[MeshEntry],
     lod: str,
     simplification: SimplifyResult | None = None,
+    upstream_loss: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     origin = Origin(lon=dataset.origin_lon, lat=dataset.origin_lat)
     min_x = min(entry.bounds_local[0] for entry in entries)
     min_y = min(entry.bounds_local[1] for entry in entries)
     max_x = max(entry.bounds_local[2] for entry in entries)
     max_y = max(entry.bounds_local[3] for entry in entries)
+    loss = collect_loss(entries, simplification, upstream_loss)
 
     return {
         "datasetId": dataset.id,
@@ -192,9 +233,12 @@ def build_manifest(
             },
             "repairedTerritories": sum(1 for entry in entries if entry.territory.repaired),
         },
-        "lossy": any(entry.is_lossy for entry in entries),
-        # What simplification dropped, kept apart from what triangulation dropped. Merging the
-        # two would hide which stage lost a part, and only one of them is supposed to.
+        # One flag over every loss source. The per-stage counts stay separate under "loss" so it
+        # is still clear which stage lost what, but no stage can be lossy while this reads false.
+        "lossy": loss["lossy"],
+        "loss": loss,
+        # Kept at the top level as well: phase 1's manifest readers and the CI report checker
+        # already address it here, and moving it would break them for no gain.
         "simplification": simplification.as_manifest_dict() if simplification else None,
         "sourceMetadata": dict(dataset.metadata),
         "territories": [entry.as_manifest_entry() for entry in entries],
@@ -356,19 +400,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="rebuild self-intersecting geometry with make_valid instead of rejecting it",
     )
+    parser.add_argument(
+        "--max-lost-area",
+        type=float,
+        default=DEFAULT_MAX_DROPPED_PART_AREA,
+        help=f"fail if simplification drops a single part larger than this many square metres "
+        f"(default: {DEFAULT_MAX_DROPPED_PART_AREA:.0f}); 'inf' records losses without failing",
+    )
+    parser.add_argument(
+        "--upstream-loss",
+        type=Path,
+        help="JSON describing geometry lost before this build (scripts/build_lod.py writes it "
+        "for the geoBoundaries normalization step), folded into the manifest's lossy flag",
+    )
     args = parser.parse_args(argv)
+
+    upstream_loss: dict[str, Any] | None = None
+    if args.upstream_loss:
+        try:
+            upstream_loss = json.loads(args.upstream_loss.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"error: cannot read --upstream-loss {args.upstream_loss}: {exc}", file=sys.stderr
+            )
+            return 1
 
     on_invalid: InvalidGeometryPolicy = "repair" if args.repair_invalid else "reject"
     try:
         dataset = load_dataset(args.input, on_invalid=on_invalid)
-        simplification = simplify_dataset(dataset, args.lod)
+        simplification = simplify_dataset(
+            dataset, args.lod, max_dropped_part_area=args.max_lost_area
+        )
         _check_simplification(simplification, allow_lossy=args.allow_lossy)
         entries = build_meshes(simplification.dataset, lod=args.lod, allow_lossy=args.allow_lossy)
     except (DatasetError, BuildError, SimplifyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    manifest = build_manifest(dataset, entries, args.lod, simplification)
+    manifest = build_manifest(dataset, entries, args.lod, simplification, upstream_loss)
     write_build(args.output, entries, manifest, clean=args.clean)
 
     if not args.quiet:

@@ -5,11 +5,19 @@
 placeholder. That was tried first and measured, not assumed. The strategy simplifies every
 ring of every zone independently with Douglas-Peucker (see
 ``vendor/territorykit/packages/generators/src/geometry-simplification.ts``); nothing ties a
-boundary shared by two provinces to a single simplified result. Its own report says so — the
-``topologyAudit`` field counted 13369 of 57978 shared segments broken at ``high`` and 48204 at
-``low`` — and the CLI still exits 0. Measured geometrically on the 81-province dataset, that
-left 163 of 197 neighbour pairs with gaps totalling 63 km², up to 2 km² between a single pair.
-``docs/territorykit-simplification-finding.md`` has the reproduction.
+boundary shared by two provinces to a single simplified result.
+
+Measured on its ``high`` output, whose 81 geometries are all valid so no repair step can be
+blamed for the numbers: 32 of the 197 neighbouring province pairs end up with a gap or an
+overlap, 0.0061 km² of gap and 0.0189 km² of overlap, against zero for the source. ``low`` is far
+worse (161 pairs, 57.9 km²) but its output also contains 23 invalid geometries, so those figures
+carry the repair with them. ``docs/territorykit-simplification-finding.md`` has both, and the
+reproduction.
+
+Its ``topologyAudit.sharedBoundaryMismatchCount`` is *not* cited as evidence: it is a difference
+of shared-segment counts, and simplification legitimately turns many short shared segments into
+fewer long ones, so a correct simplifier scores just as high. topojson — zero cracks — scores
+47357 on the same formula where TerritoryKit scores 48204.
 
 **What this does instead.** ``topojson`` decomposes the dataset into arcs, where a boundary
 two regions share is *one* arc, simplifies each arc once, and rebuilds both regions from the
@@ -36,6 +44,7 @@ from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.geometry.base import BaseGeometry
 
 from .loader import Dataset, Territory
+from .projection import Origin, project_geometry
 from .triangulate import GeometryLoss
 
 LOD_HIGH = "high"
@@ -64,6 +73,37 @@ class SimplifyError(RuntimeError):
     """Raised when a level cannot be produced, or the result violates a topology invariant."""
 
 
+DEFAULT_MAX_DROPPED_PART_AREA = 10_000.0
+"""Largest single part, in square metres, simplification may drop before the build fails.
+
+The gate is on area because a count says nothing about significance, and on the largest *single*
+part because that is the quantity that answers "did something worth seeing vanish?" — a hundred
+slivers are not one island. The total is recorded either way.
+
+The count is also the more alarming of the two numbers and the less meaningful. At ``low`` the
+part count falls by 20, but only **one** part actually disappears (Artvin, 685 m²); the other 19
+are parts merging into their neighbours as the gap between them closes, which loses no area.
+``_dropped_parts`` therefore identifies vanished parts by geometry rather than by counting.
+"""
+
+
+@dataclass(frozen=True)
+class DroppedPart:
+    """A polygon part simplification removed, with enough detail to judge whether that mattered."""
+
+    territory_id: str
+    territory_name: str
+    area: float
+    """Square metres in the dataset's local projection, not square degrees."""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "territoryId": self.territory_id,
+            "territoryName": self.territory_name,
+            "area": self.area,
+        }
+
+
 @dataclass(frozen=True)
 class SimplifyResult:
     """A simplified dataset plus what changed getting there."""
@@ -78,6 +118,7 @@ class SimplifyResult:
     part_count: int
     source_hole_count: int
     hole_count: int
+    dropped_parts: tuple[DroppedPart, ...] = ()
 
     @property
     def vertex_ratio(self) -> float:
@@ -85,7 +126,16 @@ class SimplifyResult:
             return 0.0
         return self.vertex_count / self.source_vertex_count
 
+    @property
+    def dropped_area(self) -> float:
+        return sum(part.area for part in self.dropped_parts)
+
+    @property
+    def largest_dropped_part(self) -> DroppedPart | None:
+        return max(self.dropped_parts, key=lambda part: part.area, default=None)
+
     def as_manifest_dict(self) -> dict[str, Any]:
+        largest = self.largest_dropped_part
         return {
             "lod": self.lod,
             "tolerance": self.tolerance,
@@ -95,16 +145,30 @@ class SimplifyResult:
             "partCount": self.part_count,
             "sourceHoleCount": self.source_hole_count,
             "holeCount": self.hole_count,
+            "droppedPartArea": self.dropped_area,
+            "largestDroppedPartArea": largest.area if largest else 0.0,
+            # Sorted largest first: if this list is ever truncated by a reader, the parts worth
+            # noticing are the ones that survive.
+            "droppedParts": [
+                part.as_dict() for part in sorted(self.dropped_parts, key=lambda p: -p.area)
+            ],
             **self.loss.as_manifest_dict(),
         }
 
 
-def simplify_dataset(dataset: Dataset, lod: str) -> SimplifyResult:
+def simplify_dataset(
+    dataset: Dataset,
+    lod: str,
+    max_dropped_part_area: float = DEFAULT_MAX_DROPPED_PART_AREA,
+) -> SimplifyResult:
     """Simplify every territory to ``lod``, keeping shared boundaries identical.
 
     ``high`` is not a pass-through: it is a real simplification at a fine tolerance. What makes
     it the level that "preserves the source" is that it is measured to keep every part and hole,
     which the build CLI's lossy gate then enforces.
+
+    ``max_dropped_part_area`` is the area gate described on
+    ``DEFAULT_MAX_DROPPED_PART_AREA``; pass ``float("inf")`` to record losses without failing.
     """
     if lod not in LOD_TOLERANCES:
         raise SimplifyError(f"unknown lod {lod!r}; available: {', '.join(LOD_LEVELS)}")
@@ -116,9 +180,11 @@ def simplify_dataset(dataset: Dataset, lod: str) -> SimplifyResult:
     source_geometries = {territory.id: territory.geometry for territory in territories}
 
     simplified = _simplify_geometries(source_geometries, tolerance)
+    origin = Origin(lon=dataset.origin_lon, lat=dataset.origin_lat)
 
     skipped_parts = 0
     skipped_rings = 0
+    dropped: list[DroppedPart] = []
     rebuilt: list[Territory] = []
     for territory in territories:
         geometry = simplified[territory.id]
@@ -133,6 +199,7 @@ def simplify_dataset(dataset: Dataset, lod: str) -> SimplifyResult:
         # anyone remembering to add a flag for it.
         skipped_parts += max(0, _part_count(territory.geometry) - _part_count(geometry))
         skipped_rings += holes_removed
+        dropped.extend(_dropped_parts(territory, geometry, origin))
         rebuilt.append(replace(territory, geometry=geometry))
 
     loss = GeometryLoss(skipped_parts=skipped_parts, skipped_rings=skipped_rings)
@@ -144,7 +211,10 @@ def simplify_dataset(dataset: Dataset, lod: str) -> SimplifyResult:
             f"{len(result_dataset)}; regions must never appear or disappear"
         )
 
+    _check_dropped_area(dropped, lod, tolerance, max_dropped_part_area)
+
     return SimplifyResult(
+        dropped_parts=tuple(dropped),
         dataset=result_dataset,
         lod=lod,
         tolerance=tolerance,
@@ -155,6 +225,50 @@ def simplify_dataset(dataset: Dataset, lod: str) -> SimplifyResult:
         part_count=sum(_part_count(t.geometry) for t in rebuilt),
         source_hole_count=sum(_hole_count(g) for g in source_geometries.values()),
         hole_count=sum(_hole_count(t.geometry) for t in rebuilt),
+    )
+
+
+def _dropped_parts(
+    territory: Territory, simplified: BaseGeometry, origin: Origin
+) -> list[DroppedPart]:
+    """Which source parts have no surviving counterpart, and how large they were.
+
+    A source part counts as dropped when nothing in the simplified geometry intersects it. Area
+    is reported in local metres rather than square degrees, because square degrees are not a unit
+    anyone can judge an island by.
+    """
+    source_parts = _parts(territory.geometry)
+    if len(source_parts) == len(_parts(simplified)):
+        return []
+
+    survivors = _parts(simplified)
+    dropped = []
+    for part in source_parts:
+        if any(part.intersects(survivor) for survivor in survivors):
+            continue
+        dropped.append(
+            DroppedPart(
+                territory_id=territory.id,
+                territory_name=territory.name,
+                area=project_geometry(part, origin).area,
+            )
+        )
+    return dropped
+
+
+def _check_dropped_area(
+    dropped: list[DroppedPart], lod: str, tolerance: float, limit: float
+) -> None:
+    oversized = sorted((part for part in dropped if part.area > limit), key=lambda p: -p.area)
+    if not oversized:
+        return
+    detail = "\n  ".join(
+        f"{part.territory_name} ({part.territory_id}): {part.area:.1f} m²" for part in oversized[:5]
+    )
+    raise SimplifyError(
+        f"lod '{lod}' (tolerance {tolerance}) dropped {len(oversized)} part(s) larger than the "
+        f"{limit:.0f} m² limit, which is too big to lose without saying so. Raise "
+        f"--max-lost-area to accept it:\n  {detail}"
     )
 
 
