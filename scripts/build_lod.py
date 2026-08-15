@@ -79,21 +79,29 @@ class Normalization:
     exists before anyone has to go looking for it.
     """
 
-    @property
-    def is_lossy(self) -> bool:
-        return bool(self.dropped_parts or self.dropped_holes)
-
     def as_dict(self) -> dict[str, Any]:
+        """The loss records first, then a ``lossy`` derived from them and from nothing else.
+
+        Mirrors ``geometry_api.loss.derive_lossy`` rather than importing it: this script runs the
+        geometry package as a subprocess precisely so it does not depend on it being importable
+        here. The duplication is not left to trust — ``scripts/check_lod_report.py`` recomputes
+        the flag from the same records and fails CI if the two ever disagree, and nothing
+        downstream reads this boolean to decide anything (``collect_loss`` ignores it and looks
+        at the counts).
+        """
+        records: dict[str, Any] = {
+            "droppedParts": self.dropped_parts,
+            "droppedPartDetails": self.dropped_part_details,
+            "droppedHoles": self.dropped_holes,
+            "droppedHoleDetails": self.dropped_hole_details,
+        }
         return {
             "featureCount": self.feature_count,
             "sourceCountryCode": self.source_country_code,
             "countryCode": self.country_code,
             "countryCodesRewritten": self.country_codes_rewritten,
-            "droppedParts": self.dropped_parts,
-            "droppedPartDetails": self.dropped_part_details,
-            "droppedHoles": self.dropped_holes,
-            "droppedHoleDetails": self.dropped_hole_details,
-            "lossy": self.is_lossy,
+            **records,
+            "lossy": any(bool(value) for value in records.values()),
         }
 
 
@@ -193,7 +201,7 @@ def normalize_geoboundaries(source: Path, destination: Path, country: str) -> No
     )
 
 
-def _run(command: list[str], step: str, cwd: Path | None = None) -> str:
+def run_step(command: list[str], step: str, cwd: Path | None = None) -> str:
     """Run a subprocess and turn a failure into a message that says which step broke."""
     try:
         completed = subprocess.run(
@@ -219,7 +227,7 @@ def import_dataset(normalized: Path, output: Path, country: str, level: str, dat
             f'  corepack pnpm --filter "@territory-kit/cli..." build'
         )
 
-    stdout = _run(
+    stdout = run_step(
         [
             "node",
             str(TERRITORY_CLI),
@@ -260,7 +268,7 @@ def build_level(dataset: Path, output: Path, lod: str, upstream_loss: Path) -> d
     ``upstream_loss`` carries the normalization losses forward, so each level's manifest accounts
     for everything dropped on the way to it and not only for what its own two stages dropped.
     """
-    _run(
+    run_step(
         [
             sys.executable,
             "-m",
@@ -353,6 +361,11 @@ def main(argv: list[str] | None = None) -> int:
                 "triangles": manifest["totals"]["triangles"],
                 "bytes": manifest["totals"]["bytes"],
                 "simplification": manifest["simplification"],
+                # The whole per-level loss block, not just the flag it produced. Carrying only
+                # the flag meant the checker had nothing to check it against: a level could
+                # claim lossy=true with no upstream block behind it, or an upstream block whose
+                # counts contradicted its own boolean, and CI would pass.
+                "loss": manifest["loss"],
                 "lossy": manifest["lossy"],
             }
             print(
