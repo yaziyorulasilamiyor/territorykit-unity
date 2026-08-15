@@ -52,17 +52,22 @@ from shapely.geometry.base import BaseGeometry
 
 from geometry_api.build import collect_loss
 from geometry_api.encoding import decode_tkms, encode_tkms
-from geometry_api.loader import Dataset
+from geometry_api.loader import Dataset, Territory
 from geometry_api.projection import Origin, project_geometry
 from geometry_api.simplify import (
     LOD_HIGH,
     LOD_LEVELS,
     LOD_LOW,
     LOD_MEDIUM,
+    DroppedPart,
     SimplifyError,
+    SimplifyResult,
+    TopologyChange,
+    _analyse_parts,
+    _check_dropped_area,
     simplify_dataset,
 )
-from geometry_api.triangulate import triangulate
+from geometry_api.triangulate import GeometryLoss, triangulate
 
 from helpers import count_containing_triangles, random_points_inside  # isort: skip
 
@@ -90,6 +95,11 @@ def _surface_from_decoded(payload: bytes) -> BaseGeometry:
 
     The triangles tile the region without overlapping, so this is a valid coverage and
     ``coverage_union_all`` can merge them far faster than a general union.
+
+    An invalid result fails the test instead of being repaired. It used to call ``make_valid``
+    here, which changed nothing today — all three levels produce valid surfaces — but a decoded
+    mesh whose triangles do not tile the region is precisely the defect the gap and overlap
+    measurements below exist to catch, and repairing it first would let them measure the repair.
     """
     decoded = decode_tkms(payload)
     corners = np.asarray(decoded.vertices, dtype=np.float64)[
@@ -97,7 +107,12 @@ def _surface_from_decoded(payload: bytes) -> BaseGeometry:
     ]
     triangles = shapely.polygons(np.concatenate([corners, corners[:, :1]], axis=1))
     merged = shapely.coverage_union_all(triangles)
-    return merged if merged.is_valid else shapely.make_valid(merged)
+    assert merged.is_valid, (
+        f"the decoded mesh does not form a valid surface "
+        f"({shapely.is_valid_reason(merged)}); repairing it here would hide exactly the kind of "
+        f"broken triangulation the crack measurements are looking for"
+    )
+    return merged
 
 
 def _run_level(dataset: Dataset, lod: str) -> LevelRun:
@@ -309,16 +324,20 @@ def test_dropped_parts_are_recorded_with_their_area(sample_dataset: Dataset) -> 
     """A count cannot tell 20 slivers from one real island, so the areas are kept.
 
     Also pins the distinction the part *count* hides: at low the count falls by 23, but only one
-    part actually disappears — the other 22 are parts merging into their neighbours as the gap
-    between them closes, which loses no area at all.
+    part actually disappears — the other 22 are the net effect of parts merging into their
+    neighbours as the gap between them closes, which loses no area at all. ``skippedParts`` is
+    the number of parts that vanished, not the change in the count; the merges are booked under
+    ``topologyChanges`` and are proved to add up in
+    ``test_topology_accounting_and_loss_add_up_to_the_part_count_change``.
 
     (23 and not the 20 the full chain reports: this runs on the raw GeoJSON, which still has the
     seven islets that build_lod.py's normalization removes before the importer sees them.)
     """
     result = simplify_dataset(sample_dataset, LOD_LOW)
 
-    assert result.loss.skipped_parts == 23, "part count falls by 23"
-    assert len(result.dropped_parts) == 1, "but only one part actually vanishes"
+    assert result.source_part_count - result.part_count == 23, "part count falls by 23"
+    assert result.loss.skipped_parts == 1, "but only one part actually vanishes"
+    assert len(result.dropped_parts) == 1
 
     vanished = result.largest_dropped_part
     assert vanished is not None
@@ -333,6 +352,236 @@ def test_dropping_a_part_bigger_than_the_limit_fails_the_build(sample_dataset: D
 
     with pytest.raises(SimplifyError, match="too big to lose"):
         simplify_dataset(sample_dataset, LOD_LOW, max_dropped_part_area=100.0)
+
+
+# --------------------------------------------------------------------------------------------
+# The detector itself. ``_analyse_parts`` is exercised directly because these are cases the real
+# dataset does not produce — the point of a counterexample is that it is constructed, and
+# steering topojson into emitting one is neither possible nor the thing under test.
+# --------------------------------------------------------------------------------------------
+
+_ORIGIN = Origin(lon=35.0, lat=39.0)
+
+
+def _box(min_lon: float, min_lat: float, size: float) -> shapely.Polygon:
+    return shapely.box(min_lon, min_lat, min_lon + size, min_lat + size)
+
+
+def _territory(geometry: BaseGeometry) -> Territory:
+    return Territory(id="tr:test", name="Test", geometry=geometry)
+
+
+def test_a_vanished_part_is_found_even_when_the_part_count_is_unchanged() -> None:
+    """Counterexample 1: source A+B, output A+C. Two parts on each side, B gone.
+
+    The detector used to return early whenever the counts matched, on the assumption that an
+    equal number of parts meant the same parts. It does not: simplification can drop one part
+    and split another in the same region, and the arithmetic hides both.
+    """
+    a = _box(30.0, 39.0, 0.10)
+    b = _box(31.0, 39.0, 0.05)
+    c = _box(32.0, 39.0, 0.05)
+
+    source = _territory(shapely.MultiPolygon([a, b]))
+    output = shapely.MultiPolygon([a, c])
+
+    dropped, _ = _analyse_parts(source, output, _ORIGIN)
+
+    assert len(dropped) == 1, "B has no counterpart in the output and must be reported"
+    assert dropped[0].area == pytest.approx(project_geometry(b, _ORIGIN).area)
+
+
+def test_a_part_touching_the_output_at_a_single_point_has_not_survived() -> None:
+    """Counterexample 2: a part that only *touches* the result shares no area with it.
+
+    ``intersects()`` is true for a single shared vertex, so a part of well over a square
+    kilometre counted as alive and the 10.000 m² gate never fired.
+    """
+    big = _box(30.0, 39.0, 0.012)
+    # Shares exactly one corner with `big`, nothing else.
+    neighbour = _box(30.012, 39.012, 0.05)
+
+    source = _territory(big)
+    lost_area = project_geometry(big, _ORIGIN).area
+    assert lost_area > 1_000_000, "the fixture has to be far above the 10.000 m² gate to matter"
+    assert big.intersects(neighbour), "the whole point is that intersects() says yes"
+    assert big.intersection(neighbour).area == 0.0
+
+    dropped, _ = _analyse_parts(source, neighbour, _ORIGIN)
+
+    assert len(dropped) == 1
+    assert dropped[0].area == pytest.approx(lost_area)
+
+    with pytest.raises(SimplifyError, match="too big to lose"):
+        _check_dropped_area(dropped, LOD_LOW, 0.0025, 10_000.0, float("inf"))
+
+
+def test_a_part_that_only_moved_its_boundary_still_counts_as_alive() -> None:
+    """The other side of the threshold: simplification is allowed to move a boundary.
+
+    Without this the two tests above could be satisfied by calling every changed part dropped,
+    which would make the numbers useless in the opposite direction.
+    """
+    source = _territory(_box(30.0, 39.0, 0.10))
+    shrunk = shapely.box(30.0, 39.0, 30.06, 39.06)  # 36% of the source area
+
+    dropped, change = _analyse_parts(source, shrunk, _ORIGIN)
+
+    assert dropped == []
+    assert change is None
+
+
+def test_merges_and_splits_are_counted_as_topology_change_not_as_loss() -> None:
+    """Two islands becoming one part lose no ground, so they are booked separately."""
+    left = _box(30.0, 39.0, 0.05)
+    right = _box(30.06, 39.0, 0.05)
+    merged = shapely.box(30.0, 39.0, 30.11, 39.05)
+
+    two_islands = _territory(shapely.MultiPolygon([left, right]))
+    dropped, change = _analyse_parts(two_islands, merged, _ORIGIN)
+
+    assert dropped == [], "nothing was lost; the two parts are both inside the merged one"
+    assert change is not None
+    assert (change.merges, change.splits) == (1, 0)
+
+    # And the reverse direction, including the three-way case the report's arithmetic depends on.
+    thirds = shapely.MultiPolygon(
+        [
+            shapely.box(30.0, 39.0, 30.03, 39.05),
+            shapely.box(30.04, 39.0, 30.07, 39.05),
+            shapely.box(30.08, 39.0, 30.11, 39.05),
+        ]
+    )
+    _, split = _analyse_parts(_territory(merged), thirds, _ORIGIN)
+    assert split is not None
+    assert (split.merges, split.splits) == (0, 2), "one part becoming three contributes 2, not 1"
+
+
+def test_the_cumulative_gate_catches_what_the_per_part_gate_waves_through() -> None:
+    """Six parts of 9.999 m² clear the single-part limit and take 60.000 m² with them."""
+    slivers = [
+        DroppedPart(territory_id=f"tr:{index}", territory_name=f"P{index}", area=9_999.0)
+        for index in range(6)
+    ]
+
+    _check_dropped_area(slivers, LOD_LOW, 0.0025, 10_000.0, float("inf"))
+
+    with pytest.raises(SimplifyError, match="cumulative limit"):
+        _check_dropped_area(slivers, LOD_LOW, 0.0025, 10_000.0, 50_000.0)
+
+
+def test_the_cumulative_gate_is_wired_into_the_real_build(sample_dataset: Dataset) -> None:
+    result = simplify_dataset(sample_dataset, LOD_LOW)
+    assert 0.0 < result.dropped_area < 50_000.0, "the default has to have headroom on real data"
+
+    with pytest.raises(SimplifyError, match="cumulative limit"):
+        simplify_dataset(
+            sample_dataset,
+            LOD_LOW,
+            max_dropped_part_area=float("inf"),
+            max_total_dropped_area=100.0,
+        )
+
+
+def test_topology_accounting_and_loss_add_up_to_the_part_count_change(
+    sample_dataset: Dataset,
+) -> None:
+    """The identity that makes the two books trustworthy, checked on the real dataset.
+
+    Every part the source had is either still there, merged with another, split into several, or
+    gone. So (parts in − parts out) has to equal (merges − splits + parts dropped) exactly. A
+    number invented on either side breaks this.
+    """
+    for lod in LOD_LEVELS:
+        result = simplify_dataset(sample_dataset, lod)
+        expected = result.source_part_count - result.part_count
+        accounted = result.merges - result.splits + len(result.dropped_parts)
+        assert accounted == expected, (
+            f"lod '{lod}': part count moved by {expected} but the books account for "
+            f"{accounted} ({result.merges} merges, {result.splits} splits, "
+            f"{len(result.dropped_parts)} dropped)"
+        )
+
+    low = simplify_dataset(sample_dataset, LOD_LOW)
+    assert low.merges > 0 and low.splits > 0, "low is the level with topology churn to record"
+    manifest = low.as_manifest_dict()
+    assert manifest["topologyChanges"]["netPartChange"] == low.merges - low.splits
+    assert manifest["topologyChanges"]["regions"], "the report has to name which regions changed"
+
+
+def test_a_merge_alone_does_not_make_a_level_lossy() -> None:
+    """Merges are a topology change, not a loss, so they must not reach the lossy flag."""
+    merged_only = _result_with(
+        dropped=(),
+        changes=(TopologyChange(territory_id="tr:1", territory_name="One", merges=19, splits=0),),
+    )
+
+    assert merged_only.is_lossy is False
+    assert collect_loss([], merged_only, upstream=None)["lossy"] is False
+    assert merged_only.as_manifest_dict()["topologyChanges"]["merges"] == 19
+
+
+def _result_with(
+    dropped: tuple, changes: tuple, loss: GeometryLoss | None = None
+) -> SimplifyResult:
+    """A SimplifyResult carrying exactly the records a test wants to reason about."""
+    return SimplifyResult(
+        dataset=Dataset(
+            id="d",
+            name="D",
+            territories=(_territory(_box(30.0, 39.0, 0.1)),),
+            source_format="geojson",
+        ),
+        lod=LOD_LOW,
+        tolerance=0.0025,
+        loss=loss or GeometryLoss(),
+        source_vertex_count=10,
+        vertex_count=10,
+        source_part_count=2,
+        part_count=2,
+        source_hole_count=0,
+        hole_count=0,
+        dropped_parts=dropped,
+        topology_changes=changes,
+    )
+
+
+def test_a_dropped_part_makes_the_build_lossy_even_when_every_counter_reads_zero() -> None:
+    """Counterexample 3: dropped_parts is populated, GeometryLoss is all zeroes.
+
+    This is the phase 1 bug's third appearance. ``collect_loss`` asked
+    ``simplification.loss.is_lossy`` — three integers — and answered "nothing was lost" while a
+    20.000 m² part sat in the records right next to it.
+    """
+    result = _result_with(
+        dropped=(DroppedPart(territory_id="tr:1", territory_name="One", area=20_000.0),),
+        changes=(),
+        loss=GeometryLoss(),
+    )
+
+    assert result.loss.is_lossy is False, "the counters really are all zero; that is the trap"
+    assert result.is_lossy is True
+    assert collect_loss([], result, upstream=None)["lossy"] is True
+
+
+def test_upstream_counts_outrank_the_upstream_boolean_in_both_directions() -> None:
+    """Counterexample 4: an upstream block whose flag contradicts its own numbers.
+
+    ``{"droppedParts": 7, "lossy": false}`` used to be accepted verbatim, so seven islets
+    removed before this build ever started were reported as no loss at all. The boolean is now
+    never read; what the producer counted is what counts.
+    """
+    lying_low = {"droppedParts": 7, "droppedPartDetails": ["a"] * 7, "lossy": False}
+    assert collect_loss([], None, upstream=lying_low)["lossy"] is True
+
+    lying_high = {"droppedParts": 0, "droppedPartDetails": [], "droppedHoles": 0, "lossy": True}
+    assert collect_loss([], None, upstream=lying_high)["lossy"] is False, (
+        "a boolean with no records behind it is not evidence either; "
+        "scripts/check_lod_report.py is what fails the producer for lying"
+    )
+
+    honest = {"droppedParts": 7, "droppedPartDetails": ["a"] * 7, "lossy": True}
+    assert collect_loss([], None, upstream=honest)["lossy"] is True
 
 
 def test_the_lossy_flag_covers_every_stage_not_just_triangulation(
