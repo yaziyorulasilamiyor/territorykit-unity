@@ -19,21 +19,49 @@ Both are asserted to be *exactly* zero, not zero within a tolerance. That is not
 1 proved neighbours are handed bit-identical vertices and that quantization is elementwise, and
 simplification runs on shared arcs, so the two sides of a boundary are the same numbers. Anything
 above zero means that chain broke somewhere, and a tolerance would hide it.
+
+**Known limits of these checks.** They pass on this dataset and the result is real, but they are
+not a proof of crack-freeness in general:
+
+1. *The gap metric only sees enclosed gaps.* It counts interior rings of the union, so a crack
+   that reaches the outer boundary of the country is not enclosed by anything and leaves no
+   hole to find. Cracks along the coast or the land border can therefore go unseen. Interior
+   province-to-province cracks — which is where independent simplification actually breaks
+   things, and where TerritoryKit's output failed — do get caught.
+2. *The shared-vertex check tests existence, not completeness.* It asserts each neighbouring
+   pair shares **at least one** stored vertex. Two provinces agreeing on one end of a long
+   border and disagreeing along all of it would still pass. The gap and overlap measurements are
+   what actually constrain the whole boundary; this one explains the mechanism behind them.
+3. *Overlap is only measured between pairs whose bounding boxes meet*, which is exhaustive for
+   real overlaps but means the count is of candidate pairs, not of all pairs.
+
+Closing 1 and 2 needs a per-boundary vertex-sequence comparison rather than a set intersection.
+That is deliberately not attempted here; the limits are recorded so the guarantee is not read as
+stronger than it is.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pytest
 import shapely
 from shapely.geometry.base import BaseGeometry
 
+from geometry_api.build import collect_loss
 from geometry_api.encoding import decode_tkms, encode_tkms
 from geometry_api.loader import Dataset
 from geometry_api.projection import Origin, project_geometry
-from geometry_api.simplify import LOD_HIGH, LOD_LEVELS, LOD_LOW, LOD_MEDIUM, simplify_dataset
+from geometry_api.simplify import (
+    LOD_HIGH,
+    LOD_LEVELS,
+    LOD_LOW,
+    LOD_MEDIUM,
+    SimplifyError,
+    simplify_dataset,
+)
 from geometry_api.triangulate import triangulate
 
 from helpers import count_containing_triangles, random_points_inside  # isort: skip
@@ -127,7 +155,10 @@ def _interior_ring_area(geometry: BaseGeometry) -> float:
 def test_no_cracks_between_neighbours_after_triangulation_and_float32(
     levels: dict[str, LevelRun], lod: str
 ) -> None:
-    """The phase's central claim, measured on decoded meshes rather than on polygons."""
+    """The phase's central claim, measured on decoded meshes rather than on polygons.
+
+    Only *enclosed* gaps are visible here — see limit 1 in the module docstring.
+    """
     run = levels[lod]
     union = shapely.union_all(list(run.surfaces.values()))
 
@@ -162,6 +193,10 @@ def test_neighbours_still_share_bit_identical_vertices(
 
     The crack test above proves the areas line up; this proves *why*, and would catch a change
     that happened to close the gaps by some other route.
+
+    Limit, stated because the name overpromises: this asserts each pair shares **at least one**
+    stored vertex, not that they agree along the whole boundary. See limit 2 in the module
+    docstring — the area measurements are what constrain the rest of the border.
     """
     simplified = simplify_dataset(sample_dataset, lod)
     origin = Origin(lon=sample_dataset.origin_lon, lat=sample_dataset.origin_lat)
@@ -268,6 +303,61 @@ def test_topology_is_preserved_exactly_at_high_and_only_loses_detail_below(
             f"lod '{lod}' invented {run.hole_count} hole(s); the source dataset has none"
         )
         previous_parts = run.part_count
+
+
+def test_dropped_parts_are_recorded_with_their_area(sample_dataset: Dataset) -> None:
+    """A count cannot tell 20 slivers from one real island, so the areas are kept.
+
+    Also pins the distinction the part *count* hides: at low the count falls by 23, but only one
+    part actually disappears — the other 22 are parts merging into their neighbours as the gap
+    between them closes, which loses no area at all.
+
+    (23 and not the 20 the full chain reports: this runs on the raw GeoJSON, which still has the
+    seven islets that build_lod.py's normalization removes before the importer sees them.)
+    """
+    result = simplify_dataset(sample_dataset, LOD_LOW)
+
+    assert result.loss.skipped_parts == 23, "part count falls by 23"
+    assert len(result.dropped_parts) == 1, "but only one part actually vanishes"
+
+    vanished = result.largest_dropped_part
+    assert vanished is not None
+    assert vanished.territory_name == "Artvin"
+    assert vanished.area == pytest.approx(684.6, abs=0.5)
+    assert result.dropped_area == pytest.approx(vanished.area)
+
+
+def test_dropping_a_part_bigger_than_the_limit_fails_the_build(sample_dataset: Dataset) -> None:
+    """The gate is on area, so an island that matters cannot leave through the count."""
+    simplify_dataset(sample_dataset, LOD_LOW, max_dropped_part_area=10_000.0)
+
+    with pytest.raises(SimplifyError, match="too big to lose"):
+        simplify_dataset(sample_dataset, LOD_LOW, max_dropped_part_area=100.0)
+
+
+def test_the_lossy_flag_covers_every_stage_not_just_triangulation(
+    sample_dataset: Dataset, tmp_path: Path
+) -> None:
+    """Regression: 'low' reported lossy=false while simplification had dropped 20 parts.
+
+    Same shape as the phase 1 bug — a loss path with no counter — so the flag is checked against
+    each source that can lose geometry, including one upstream of this process entirely.
+    """
+    entries: list = []
+    simplification = simplify_dataset(sample_dataset, LOD_LOW)
+    assert simplification.loss.is_lossy, "low drops parts; the fixture for this test is wrong"
+
+    loss = collect_loss(entries, simplification, upstream=None)
+    assert loss["lossy"] is True, "simplification loss alone must set the flag"
+
+    clean = simplify_dataset(sample_dataset, LOD_HIGH)
+    assert not clean.loss.is_lossy
+    assert collect_loss(entries, clean, upstream=None)["lossy"] is False
+
+    upstream = {"droppedParts": 7, "droppedHoles": 0, "lossy": True}
+    assert collect_loss(entries, clean, upstream=upstream)["lossy"] is True, (
+        "geometry dropped before this build still has to reach the manifest"
+    )
 
 
 @pytest.mark.parametrize("lod", LOD_LEVELS)
