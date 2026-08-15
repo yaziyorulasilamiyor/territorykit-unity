@@ -13,6 +13,12 @@ Bu proje [Semantic Versioning](https://semver.org/) kullanır.
   build CLI'ında `--lod high|medium|low`, uçtan uca `scripts/build_lod.py` zinciri ve
   `scripts/check_lod_report.py` doğrulayıcısı. Üç seviyede de komşular arası boşluk ve
   çakışma **tam sıfır** (üçgenleme ve float32 sonrası ölçüldü)
+- Kayıp muhasebesi için tek türetme noktası (`geometry_api/loss.py`): `lossy` bayrağı yalnız
+  kayıtlardan hesaplanır, hiçbir boolean alan okunmaz
+- Topoloji değişikliği muhasebesi: birleşme/bölünme sayıları manifestte `topologyChanges`
+  altında, bölge bölge. Kayıp *değil*, ama parça sayısını değiştirdiği için raporlanıyor
+- `--max-total-lost-area`: kümülatif kayıp alan kapısı (tek parça kapısına ek)
+- `scripts/repro_territorykit_finding.py`: iki upstream bulgusunu tek komutla tekrar üretir
 
 ### Changed
 - `high` seviyesi artık 5e-05 toleransla sadeleştiriliyor: 81 il için 365.481 → 240.379 vertex.
@@ -21,5 +27,7 @@ Bu proje [Semantic Versioning](https://semver.org/) kullanır.
 
 ### Notes
 - Sadeleştirme TerritoryKit'in `--strategy topology-safe` komutuyla **yapılmıyor**: strateji
-  ring'leri bağımsız sadeleştiriyor ve 197 komşu çiftinin 163'ünde çatlak bırakıyor.
-  Ölçümler ve tekrar üretme adımları: `docs/territorykit-simplification-finding.md`
+  ring'leri bağımsız sadeleştiriyor; 197 komşu çiftinin `high`'da 32'sinde, `low`'da 161'inde
+  çatlak bırakıyor. Ölçümler ve tekrar üretme: `docs/territorykit-simplification-finding.md`
+- **Parça sayısı seviyeler arasında sabit değil** (`low`: 705 → 685). Bilinçli bir istisna;
+  gerekçesi ve bedeli `docs/PROJE-TALIMATI.md` FAZ 2 maddesinde yazılı

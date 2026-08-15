@@ -419,7 +419,26 @@ TKMS mesh dosyaları × 3 seviye
 - [ ] **Paylaşılan vertex testi:** Faz 1'deki komşu-vertex eşitlik testini üç seviyenin her birinde tekrarla
 - [ ] **Kapsama testi:** Faz 1'in nokta-üçgen-içinde testini her seviyede tekrarla
 - [ ] **Vertex azalması:** seviye başına tablo; `low`, `high`'ın en fazla %25'i
-- [ ] **Topoloji korunumu:** bölge sayısı, parça sayısı, delik sayısı seviyeler arasında tutarlı
+- [ ] **Topoloji korunumu:** bölge sayısı, delik sayısı seviyeler arasında tutarlı. **Parça
+      sayısı için açık istisna** — aşağıya bakınız
+
+> **İstisna (Faz 2 incelemesinde alındı, bilinçli ürün kararı):** parça sayısı seviyeler
+> arasında **tutarlı değildir** ve olması da beklenmez. `low`'da 705 → 685 ölçüldü. Sebep:
+> tolerans büyüdükçe bir ilin iki parçası arasındaki boğaz kapanıyor ve iki parça tek parça
+> oluyor (30 birleşme, 11 bölünme, net 19; ayrıca gerçekten yok olan 1 parça = 20).
+>
+> **Neden kabul ediliyor:** birleşmeyi engellemenin tek yolu toleransı düşürmek, o da `low`'un
+> %25 vertex bütçesini ihlal ediyor — ölçüldü, hiçbir tolerans ikisini birden sağlamıyor. LOD'un
+> tanımı zaten "daha az detay"dır ve bileşen yapısı da detayın bir parçasıdır.
+>
+> **Bedeli, sessiz kalmasın diye yazılı:** eskiden su olan boğaz artık o ilin karası olarak
+> çiziliyor. Uzaktan bakışta görünmez ama `low` seviyesinde tıklama o noktada ili seçer —
+> Unity'de olmayan bir kara köprüsü. Yakın plan ve seçim için `high`/`medium` kullanılmalı.
+>
+> **Muhasebe zorunlu:** birleşme/bölünme **kayıp değildir** (alan kaybolmaz), o yüzden
+> `GeometryLoss`'a ve `lossy` bayrağına girmez; ayrı bir `topologyChanges` bloğunda sayılır,
+> hangi bölgelerde olduğu manifeste ve faz raporuna yazılır. Gerçekten yok olan parça ayrı
+> muhasebedir ve `--max-lost-area` / `--max-total-lost-area` ile sınırlıdır.
 - [ ] **Determinizm:** aynı girdi → byte-identik çıktı (her seviyede)
 
 **Tıkanma kuralı**
