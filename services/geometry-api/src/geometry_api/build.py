@@ -108,6 +108,10 @@ class MeshEntry:
             "lossEvents": [item.as_dict() for item in self.loss.as_events()],
             "repaired": self.territory.repaired,
             "parentId": self.territory.parent_id,
+            # Phase 3's territories filter (docs/api.md, ?administrativeLevel=). Named after the
+            # API field rather than the loader's Python attribute (Territory.level) because this
+            # is the wire contract, not an internal name.
+            "administrativeLevel": self.territory.level,
             "neighborIds": list(self.territory.neighbor_ids),
         }
 
@@ -326,7 +330,21 @@ def write_build(
     ``clean`` removes meshes left by an earlier run so the directory describes exactly one
     build. It only ever deletes files this tool writes — never the directory itself, and never
     anything it did not put there.
+
+    Refuses to write into a path with a ``revisions`` component (Phase 3,
+    ``docs/phases/FAZ-3-PLAN.md`` §3.5b): that name is reserved for
+    ``scripts/publish_dataset.py``'s atomic staging-then-rename output. A build command writing
+    there directly would create an unvalidated, non-atomic directory that looks like a published
+    revision but never went through the fail-closed checks in ``manifest_validation`` or the
+    staging/verify/rename sequence — the exact thing Phase 3's immutability guarantee assumes
+    cannot happen.
     """
+    if "revisions" in output_dir.resolve().parts:
+        raise BuildError(
+            f"refusing to write into {output_dir} — it contains a 'revisions' path component, "
+            f"which is reserved for scripts/publish_dataset.py's atomic publish. Build into a "
+            f"plain directory (e.g. the output of scripts/build_lod.py) and publish it instead."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     if clean:
         for stale in output_dir.glob(f"*{MESH_SUFFIX}"):

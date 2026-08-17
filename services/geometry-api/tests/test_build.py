@@ -454,3 +454,30 @@ def test_report_table_lists_every_territory(
     stdout = capsys.readouterr().out
     assert "territory" in stdout and "triangles" in stdout
     assert stdout.count("uint16") == 81, "one row per province, all of them uint16 today"
+
+
+def test_manifest_entries_carry_administrative_level(territorykit_dataset: Dataset) -> None:
+    """Phase 3's territories filter (?administrativeLevel=) reads this straight off the manifest."""
+    entries = build_meshes(territorykit_dataset)
+    manifest = build_manifest(territorykit_dataset, entries, "high")
+
+    by_id = {t.id: t.level for t in territorykit_dataset}
+    for entry in manifest["territories"]:
+        assert entry["administrativeLevel"] == by_id[entry["id"]]
+
+
+def test_write_build_refuses_output_under_a_revisions_directory(
+    territorykit_dataset: Dataset, tmp_path: Path
+) -> None:
+    """'revisions' is reserved for scripts/publish_dataset.py's atomic staging-then-rename output
+    (Phase 3, FAZ-3-PLAN.md §3.5b) — a build command must never write there directly."""
+    from geometry_api.build import write_build
+
+    entries = build_meshes(territorykit_dataset)
+    manifest = build_manifest(territorykit_dataset, entries, "high")
+    target = tmp_path / "artifacts" / "tr-adm1" / "revisions" / "deadbeef" / "high"
+
+    with pytest.raises(BuildError, match="revisions"):
+        write_build(target, entries, manifest)
+
+    assert not target.exists()
