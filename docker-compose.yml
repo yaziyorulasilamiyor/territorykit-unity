@@ -9,4 +9,5 @@ services:
       - ./services/geometry-api/data:/app/data
     environment:
       GEOMETRY_API_DATASET_DIR: /app/data/datasets
+      GEOMETRY_API_ARTIFACTS_DIR: /app/data/artifacts
       GEOMETRY_API_CACHE_DIR: /app/data/cache
