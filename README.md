@@ -4,21 +4,72 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 [TerritoryKit](https://github.com/mberatkaya/TerritoryKit) açık kaynak geospatial SDK'sının
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
-> Durum: Erken geliştirme (Faz 1 tamamlandı — geometri motoru). Henüz kullanılabilir bir sürüm yok.
+> Durum: Erken geliştirme (Faz 2 tamamlandı — LOD üretimi). Henüz kullanılabilir bir sürüm yok.
 
-## Mesh üretimi (Faz 1)
+## LOD üretimi (Faz 2)
+
+Ham geoBoundaries GeoJSON'undan üç detay seviyesinde TKMS mesh üretmek — tek komut:
+
+```bash
+python scripts/build_lod.py --input services/geometry-api/data/datasets/turkey-provinces.geojson --output data/lod --clean
+```
+
+Zincir: normalizasyon → `territory import geoboundaries` (TerritoryKit CLI) → `dataset.json` →
+seviye başına sadeleştirme + üçgenleme → `high/`, `medium/`, `low/` dizinleri ve `lod-report.json`.
+
+### Önkoşul: TerritoryKit CLI
+
+Zincirin import adımı submodule'deki CLI'ı kullanır, o yüzden bir kez build edilmeli:
+
+```bash
+cd vendor/territorykit
+corepack pnpm install
+corepack pnpm --filter "@territory-kit/cli..." build
+```
+
+| Gereksinim | Sürüm | Not |
+|---|---|---|
+| Node.js | `>=22` (denenen: 24.18.0) | `vendor/territorykit/package.json` `engines` alanı |
+| pnpm | 11.7.0 | `packageManager` ile sabitlenmiş; `corepack pnpm` ayrıca kurulum istemez |
+
+İki bilinen takoz:
+
+- `corepack enable` Windows'ta `C:\Program Files\nodejs` altına yazamayıp `EPERM` verebilir.
+  Gerek yok — `corepack pnpm ...` doğrudan çalışır.
+- pnpm, `@scarf/scarf` (telemetri) paketinin install script'ini bloklayıp `ERR_PNPM_IGNORED_BUILDS`
+  ile çıkış kodu 1 döner. Script'i **onaylamayın**; `pnpm config set strict-dep-builds false`
+  ile uyarıyı hataya çevirmeyi kapatın. Paket yine çalıştırılmaz.
+
+> Sadeleştirme neden TerritoryKit'in `--strategy topology-safe` komutuyla yapılmıyor:
+> [docs/territorykit-simplification-finding.md](docs/territorykit-simplification-finding.md).
+
+## Mesh üretimi (tek seviye)
 
 Örnek veriyi indirip tüm bölgeler için TKMS mesh üretmek:
+
+Tek bir seviyeyi doğrudan üretmek (TerritoryKit CLI gerektirmez):
 
 ```bash
 python scripts/fetch_sample_dataset.py
 cd services/geometry-api
-python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes
+python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes --lod high
 ```
 
 Çıktı: bölge başına bir `.tkms` dosyası ve origin, bölge sayıları, bbox ve kaynak lisansını
 taşıyan bir `index.json`. Geçersiz geometri varsayılan olarak reddedilir (`--repair-invalid`),
 float32 ızgarasında kaybolan parça/delik `high` seviyesinde hata verir (`--allow-lossy`).
+
+`--lod high|medium|low`; her seviye ayrı çıktı dizinine yazılır. 81 il ölçümü:
+
+| Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik |
+|---|---|---|---|---|---|---|
+| kaynak | 366.157 | — | — | — | 705 | 0 |
+| high | 240.379 | %100 | 238.969 | 3.359.438 | 705 | 0 |
+| medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 |
+| low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 |
+
+`high` her parçayı ve deliği koruyor (kayıp sıfır, build kapısı bunu zorluyor); `medium` ve `low`
+küçük adaları bilerek düşürüyor ve düşen her parça `index.json`'a yazılıyor.
 
 ## Bileşenler
 

@@ -204,15 +204,28 @@ def test_recorded_parts_always_carry_triangles(
             assert inside > 0, f"{case.name}: a recorded part carries no triangles"
 
 
-def test_loss_structure_reports_every_field(fixtures_dir) -> None:
-    """One structure, one place: the manifest keys come from the loss object itself."""
+def test_loss_structure_reports_every_counter_as_a_typed_event(fixtures_dir) -> None:
+    """Each counter becomes an event of a kind the schema knows, or the build stops.
+
+    The three counters used to be serialised as three ``skipped*``/``degenerate*`` keys and
+    recognised downstream by their names. They are now emitted as kinds, which means a fourth
+    counter added here without a matching kind in ``geometry_api.loss`` raises instead of being
+    quietly ignored by whoever reads the manifest.
+    """
     assert GeometryLoss().is_lossy is False
+    assert GeometryLoss().as_events() == (), "no zero-valued events; an empty ledger is empty"
     assert GeometryLoss(degenerate_triangles=1).is_lossy is True
-    assert set(GeometryLoss().as_manifest_dict()) == {
-        "skippedParts",
-        "skippedRings",
-        "degenerateTriangles",
+
+    every = GeometryLoss(skipped_parts=2, skipped_rings=3, degenerate_triangles=4)
+    assert {item.kind: item.count for item in every.as_events()} == {
+        "skipped_part": 2,
+        "skipped_ring": 3,
+        "degenerate_triangle": 4,
     }
+    assert all(item.stage == "triangulation" for item in every.as_events())
+    assert every.ledger.stages_recorded == ("triangulation",), (
+        "this structure can only speak for triangulation and has to say so"
+    )
 
 
 def test_no_triangle_spans_two_parts(

@@ -14,6 +14,9 @@ dependencies = [
     "shapely==2.1.2",
     "mapbox-earcut==2.0.0",
     "numpy==2.5.2",
+    # Topology-preserving simplification (Phase 2). 1.10 is the floor, not a preference:
+    # 1.9 calls numpy's `in1d`, removed in numpy 2.0, so it cannot run against the pin above.
+    "topojson==1.10",
 ]
 
 [project.optional-dependencies]

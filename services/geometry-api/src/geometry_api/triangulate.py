@@ -44,6 +44,8 @@ from numpy.typing import NDArray
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from .loss import STAGE_TRIANGULATION, LossEvent, LossLedger, event
+
 MIN_RING_VERTICES = 3
 """A ring with fewer distinct vertices than this encloses no area."""
 
@@ -71,16 +73,32 @@ class GeometryLoss:
     skipped_rings: int = 0
     degenerate_triangles: int = 0
 
+    def as_events(self) -> tuple[LossEvent, ...]:
+        """These three counters as typed records against the schema in ``loss.py``.
+
+        They carry no detail strings: unlike a dropped province, "three degenerate triangles"
+        has nothing a reviewer could look up, and the schema marks these kinds accordingly. They
+        carry no area either — the float32 grid a part falls through is smaller than a square
+        millimetre, so the number worth having is the count.
+        """
+        return tuple(
+            event(STAGE_TRIANGULATION, kind, count)
+            for kind, count in (
+                ("skipped_part", self.skipped_parts),
+                ("skipped_ring", self.skipped_rings),
+                ("degenerate_triangle", self.degenerate_triangles),
+            )
+            if count
+        )
+
+    @property
+    def ledger(self) -> LossLedger:
+        return LossLedger.of(self.as_events(), stages_recorded=[STAGE_TRIANGULATION])
+
     @property
     def is_lossy(self) -> bool:
-        return bool(self.skipped_parts or self.skipped_rings or self.degenerate_triangles)
-
-    def as_manifest_dict(self) -> dict[str, int]:
-        return {
-            "skippedParts": self.skipped_parts,
-            "skippedRings": self.skipped_rings,
-            "degenerateTriangles": self.degenerate_triangles,
-        }
+        """Derived from the events, never from a counter read by hand — see ``loss.py``."""
+        return self.ledger.is_lossy
 
     def describe(self) -> str:
         return (

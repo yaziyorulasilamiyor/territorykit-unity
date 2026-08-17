@@ -102,6 +102,47 @@ Ayrıca vertex'ler üçgenlemeden **önce** float32 ızgarasına yuvarlanır (bk
 float64'te üçgenleyip sonradan cast etmek, cast sırasında sıfır alana çöken — ve dolayısıyla
 yönlendirilemeyen — üçgenler üretiyordu (ölçüm: 364.057 üçgenin 62'si, 16 ilde).
 
+## Manifest bayrakları — `lossy`, `topologyChanged`, `pickingUnsafe`
+
+Build CLI'ı her seviye dizinine bir `index.json` yazar. Üst düzeyindeki üç boolean, bir
+istemcinin (Faz 4-5'te Unity) sayıları yeniden yorumlamadan okuyabilmesi içindir. Üçü de
+**türetilir**, elle yazılmaz: kaynak, `loss` bloğundaki tipli olay kayıtlarıdır
+(`services/geometry-api/src/geometry_api/loss.py`).
+
+| Bayrak | `false` ne demek |
+|---|---|
+| `lossy` | Kaynakta olan hiçbir geometri çıktıda eksik değil |
+| `topologyChanged` | Parça ve delik (enclave) sayısı/yapısı kaynakla aynı |
+| `pickingUnsafe` | **Bu seviyenin geometrisi kaynakla topolojik olarak aynıdır; bölge seçimi (picking) güvenilirdir** |
+
+`pickingUnsafe: false`, **nihai mesh** hakkında bir iddiadır — yalnız sadeleştirme adımı
+hakkında değil. Kaynak poligonlarla o mesh arasındaki zincirin **hiçbir adımı** (geoBoundaries
+normalizasyonu, sadeleştirme, üçgenleme) geometri kaybetmemiş ve parça/delik yapısını
+değiştirmemiş demektir; dolayısıyla bir tıklama, kaynağın o noktanın sahibi dediği bölgeye
+çözülür.
+
+**Zorunlu ilişki:** `lossy: true` iken `pickingUnsafe: false` **olamaz.** Kayıp kategorisindeki
+her olay türü aynı zamanda picking'i güvensiz işaretler; ayrıca `scripts/check_lod_report.py`
+bu tutarlılığı manifest üzerinde bağımsız olarak denetler ve tutmazsa CI düşer.
+
+Bayrakları **tetikleyen** olaylar: kaybolan parça/delik/adacık (hangi adımda olursa olsun),
+üçgenlemenin atladığı parça veya halka, dejenere üçgen, parça birleşmesi/bölünmesi/oluşması,
+delik birleşmesi/bölünmesi.
+
+Bayrakları **tetiklemeyen** olaylar ve nedenleri:
+
+- `boundary_retreat` / `boundary_advance` — sınırın tolerans kadar kayması. Her seviye (`high`
+  dahil) bunu yapar; sadeleştirmenin tanımı budur. Her yerde `true` olan bir bayrak istemciye
+  bir şey söylemez. Sınırın **ne kadar** kaydığı ayrı ve sayısal olarak raporlanır:
+  `simplification.areaBudget.retainedAreaRatio` ve `minPartRetainedAreaRatio`.
+- `severe_shrink` — alanının yarısından azını koruyan parça. Yapısal değil ölçek kaybıdır,
+  yukarıdaki oranlarla raporlanır.
+- `artifact_hole_removed` — sadeleştirmenin uydurduğu, bu boru hattının geri kapattığı delik.
+  Çıktıyı kaynağa **yaklaştıran** tek yapısal olaydır; sonuçta kaynağın kapsadığı zemin kapsanır.
+
+Seviyeye özel olan `simplification.topologyChanged`, yalnız sadeleştirme adımını anlatır; üst
+düzeydeki bayraklar zincirin tamamını anlatır. İkisi kasıtlı olarak farklı sorulara cevap verir.
+
 ## Bilinen sınır: antimeridyen
 
 Mesh koordinatları dataset origin'ine göredir ve origin bbox merkezinden hesaplanır; bu yüzden

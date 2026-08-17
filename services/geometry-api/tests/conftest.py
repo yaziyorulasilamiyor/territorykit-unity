@@ -7,6 +7,7 @@ geoBoundaries TUR ADM1 has zero interior rings, so hole handling has no natural 
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,14 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_DATASET_PATH = (
     Path(__file__).resolve().parents[1] / "data" / "datasets" / "turkey-provinces.geojson"
 )
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
+"""``scripts/`` is not a package and is not installed, but it holds two pieces of live code —
+the geoBoundaries normalization and the CI report checker — that were shipping without a single
+test. Put on the path here rather than in the test module so the imports there stay ordinary."""
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 
 @pytest.fixture(scope="session")
