@@ -63,7 +63,10 @@ class BatchCache:
     def put(self, revision_id: str, key: str, data: bytes) -> None:
         path = self._path(revision_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+        # Named from a fresh uuid rather than "{key}.tmp-{uuid}" — revision_id and key are each a
+        # 64-char sha256 hex digest, and stacking both into one path component (on top of a deep
+        # pytest tmp_path) is enough to clear Windows' 260-character MAX_PATH.
+        tmp = path.parent / f".tmp-{uuid4().hex}"
         tmp.write_bytes(data)
         os.replace(tmp, path)
         self._evict_if_needed()

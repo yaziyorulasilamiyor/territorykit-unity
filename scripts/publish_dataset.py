@@ -78,7 +78,7 @@ def _etag_for(data: bytes) -> str:
 def _write_json_atomic(path: Path, data: Any) -> None:
     """Write ``path`` so a reader never sees a partial file: temp file, then ``os.replace``."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    tmp = path.parent / f".tmp-{uuid4().hex}"
     tmp.write_text(
         json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
     )

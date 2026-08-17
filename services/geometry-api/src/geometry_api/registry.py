@@ -109,6 +109,7 @@ class DatasetRegistry:
         self._tombstone_cache: dict[str, tuple[float, dict[str, str]]] = {}
         self._verified: set[tuple[str, str]] = set()
         self._manifest_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._etags_cache: dict[tuple[str, str, str], dict[str, str]] = {}
 
     # ---- dataset discovery ---------------------------------------------------------------
 
@@ -216,6 +217,19 @@ class DatasetRegistry:
         )
         self._manifest_cache[key] = manifest
         return manifest
+
+    def load_etags(self, resolved: ResolvedRevision, lod: str) -> dict[str, str]:
+        """filename -> quoted strong ETag, from the file ``publish_dataset.py`` precomputed
+        (§11.1: ETags are never hashed at request time). Cached like :meth:`load_manifest`."""
+        key = (resolved.dataset_id, resolved.revision_id, lod)
+        cached = self._etags_cache.get(key)
+        if cached is not None:
+            return cached
+        etags: dict[str, str] = json.loads(
+            (resolved.path / lod / "etags.json").read_text(encoding="utf-8")
+        )
+        self._etags_cache[key] = etags
+        return etags
 
     def territory_entry(
         self, resolved: ResolvedRevision, lod: str, territory_id: str

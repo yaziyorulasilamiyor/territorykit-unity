@@ -228,6 +228,22 @@ def test_territory_entry_raises_for_an_unknown_id(
         registry.territory_entry(resolved, "high", "does-not-exist")
 
 
+def test_load_etags_matches_the_file_on_disk(
+    published: tuple[DatasetRegistry, Path, str],
+) -> None:
+    registry, artifacts_dir, revision_id = published
+    resolved = registry.resolve("fixture")
+
+    etags = registry.load_etags(resolved, "high")
+
+    on_disk = json.loads(
+        (artifacts_dir / "fixture" / "revisions" / revision_id / "high" / "etags.json").read_text()
+    )
+    assert etags == on_disk
+    assert etags["T1.tkms"].startswith('"') and etags["T1.tkms"].endswith('"')
+    assert "T1.tkms.gz" in etags
+
+
 def test_load_manifest_matches_the_file_on_disk(
     published: tuple[DatasetRegistry, Path, str],
 ) -> None:

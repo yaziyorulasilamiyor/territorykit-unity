@@ -67,7 +67,7 @@ def install_error_handlers(app: FastAPI) -> None:
             for error in exc.errors()
         ]
         return _error_response(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             CODE_VALIDATION_ERROR,
             "the request did not match the expected shape",
             {"fields": fields},

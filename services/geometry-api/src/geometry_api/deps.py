@@ -22,7 +22,9 @@ from typing import Annotated
 
 from fastapi import Depends, Query, Request, status
 
+from geometry_api.cache import BatchCache
 from geometry_api.errors import ApiError
+from geometry_api.metrics import Metrics
 from geometry_api.registry import (
     DatasetNotFoundError,
     DatasetRegistry,
@@ -38,6 +40,16 @@ from geometry_api.registry import (
 def get_registry(request: Request) -> DatasetRegistry:
     registry: DatasetRegistry = request.app.state.registry
     return registry
+
+
+def get_batch_cache(request: Request) -> BatchCache:
+    cache: BatchCache = request.app.state.batch_cache
+    return cache
+
+
+def get_metrics(request: Request) -> Metrics:
+    metrics: Metrics = request.app.state.metrics
+    return metrics
 
 
 def as_api_error(exc: RegistryError) -> ApiError:
@@ -78,6 +90,8 @@ def as_api_error(exc: RegistryError) -> ApiError:
 
 
 RegistryDep = Annotated[DatasetRegistry, Depends(get_registry)]
+BatchCacheDep = Annotated[BatchCache, Depends(get_batch_cache)]
+MetricsDep = Annotated[Metrics, Depends(get_metrics)]
 
 
 def _resolve_and_lease(
