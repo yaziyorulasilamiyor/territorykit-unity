@@ -19,6 +19,28 @@ Bu proje [Semantic Versioning](https://semver.org/) kullanır.
   altında, bölge bölge. Kayıp *değil*, ama parça sayısını değiştirdiği için raporlanıyor
 - `--max-total-lost-area`: kümülatif kayıp alan kapısı (tek parça kapısına ek)
 - `scripts/repro_territorykit_finding.py`: iki upstream bulgusunu tek komutla tekrar üretir
+- HTTP API (Faz 3): `/v1/datasets`(+`{id}`), `.../territories`, `.../viewport` (cursor
+  sayfalama, `?revision=` sabitleme), `.../revisions/{revisionId}/mesh/{territoryId}`
+  (GET/HEAD, önceden üretilmiş gzip, strong ETag, weak `If-None-Match`, `304`),
+  `.../mesh/batch` (TKMB v1 konteyner). `/health`/`/ready`/`/metrics` kasıtlı olarak `/v1`
+  dışında
+- `scripts/publish_dataset.py`: build çıktısını `manifest_validation.check()` +
+  `check_report_matches_build()` ile doğrulayıp staging→verify→atomik rename ile
+  içerik-adresli bir revizyona (tam SHA-256, 64 hex) yayınlar; `pruned-revisions.json`
+  tombstone kaydıyla `404`/`410` ayrımı, lease dosyalarıyla aktif-istek-sırasında-budama
+  koruması
+- `geometry_api.manifest_validation`: `check_lod_report.py`'nin denetleyicisi artık paylaşılan
+  bir modül — CI script'i ve publisher aynı fail-closed kontrolü çalıştırır
+- `geometry_api.tkmb`: TKMB v1 encoder/decoder — TOC her zaman id-sıralı (istek sırası yok
+  sayılır), eksik id'ler konteynerin kendi içinde
+- `geometry_api.cache`: revizyona göre dizinlenmiş, içerik-adresli batch cache (LRU tahliye)
+- `geometry_api.registry`: revizyon çözümleme, yayın-sonrası bütünlük denetimi (§3.5a),
+  bellek-içi lease
+
+### Known limitation
+- Manifest doğrulaması, kayıt edilen olayların **kendi içinde tutarlı** olduğunu kanıtlar,
+  olayların gerçek geometriyi **doğru sınıflandırdığını** kanıtlamaz — Faz 2'den devralınan,
+  bilinçli olarak kapatılmamış bir açık (bkz. `docs/phases/FAZ-3-PLAN.md` §1.3)
 
 ### Changed
 - `high` seviyesi artık 5e-05 toleransla sadeleştiriliyor: 81 il için 365.481 → 240.379 vertex.
