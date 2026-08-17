@@ -432,13 +432,28 @@ TKMS mesh dosyaları × 3 seviye
 > tanımı zaten "daha az detay"dır ve bileşen yapısı da detayın bir parçasıdır.
 >
 > **Bedeli, sessiz kalmasın diye yazılı:** eskiden su olan boğaz artık o ilin karası olarak
-> çiziliyor. Uzaktan bakışta görünmez ama `low` seviyesinde tıklama o noktada ili seçer —
-> Unity'de olmayan bir kara köprüsü. Yakın plan ve seçim için `high`/`medium` kullanılmalı.
+> çiziliyor. Uzaktan bakışta görünmez ama tıklama o noktada ili seçer — Unity'de olmayan bir
+> kara köprüsü. `low`'da 30 birleşmenin eklediği alan **269,8 km²** ölçüldü.
 >
-> **Muhasebe zorunlu:** birleşme/bölünme **kayıp değildir** (alan kaybolmaz), o yüzden
-> `GeometryLoss`'a ve `lossy` bayrağına girmez; ayrı bir `topologyChanges` bloğunda sayılır,
-> hangi bölgelerde olduğu manifeste ve faz raporuna yazılır. Gerçekten yok olan parça ayrı
-> muhasebedir ve `--max-lost-area` / `--max-total-lost-area` ile sınırlıdır.
+> **Seçim için kanıtlanmış tek güvenli seviye `high`.** (Düzeltme, 4. inceleme turu: bu satır
+> önce "`high`/`medium` kullanılmalı" diyordu, bu **yanlıştı**.) Ölçüm: `medium`'da da 3 birleşme,
+> 3 bölünme ve gerçekten yok olan 1 parça (Artvin, 685 m²) var; eklenen alan 15,9 km². `high`'da
+> birleşme, bölünme, yok olan parça ve kaybolan delik **sıfır**. Bu, manifestte tahmine
+> bırakılmıyor: her seviye `topologyChanged` ve `pickingUnsafe` bayraklarını yazar
+> (`high`: ikisi de `false`; `medium` ve `low`: ikisi de `true`) ve CI bayrakları kayıtlardan
+> yeniden türetip uyuşmazsa düşer.
+>
+> **Muhasebe zorunlu:** birleşme/bölünme **kayıp değildir** (alan kaybolmaz), o yüzden `lossy`
+> bayrağına girmez; kayıt şemasında `change` kategorisinde durur, `topologyChanges` bloğunda
+> sayılır, hangi bölgelerde olduğu manifeste ve faz raporuna yazılır. Gerçekten yok olan parça
+> ayrı muhasebedir ve `--max-lost-area` / `--max-total-lost-area` ile sınırlıdır.
+>
+> **Denklik zorunlu (4. inceleme turu):** "bilinen kayıp yollarını say" mantığı üç turda üç kez
+> yeni bir kaçış yolu verdi. Bu yüzden her seviye için şu denklik kurulur ve **tutmazsa build
+> hata verir**: girdi alanı + kaydedilen eklenen alan − kaydedilen çıkan alan = çıktı alanı;
+> girdi parça sayısı − çıktı parça sayısı = düşen + birleşme − bölünme − oluşan; aynısı delikler
+> için. Kaydedilmemiş bir değişiklik denkliği bozar, isim kuralına da bilinen yol listesine de
+> gerek kalmaz.
 - [ ] **Determinizm:** aynı girdi → byte-identik çıktı (her seviyede)
 
 **Tıkanma kuralı**
