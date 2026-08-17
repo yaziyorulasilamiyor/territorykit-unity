@@ -17,9 +17,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import check_lod_report
 import pytest
 from build_lod import RING_AREA_FLOOR, BuildLodError, normalize_geoboundaries
-from check_lod_report import check
+from check_lod_report import LOD_LEVELS, check
+
+from geometry_api.loss import SCHEMA_VERSION, STAGES, kind_of
 
 # --------------------------------------------------------------------------------------------
 # normalize_geoboundaries
@@ -83,7 +86,8 @@ def test_sub_threshold_islets_are_dropped_counted_and_described(tmp_path: Path) 
     assert result.dropped_parts == 1
     assert len(result.dropped_part_details) == 1
     assert "Muğla" in result.dropped_part_details[0]
-    assert result.as_dict()["lossy"] is True
+    assert result.ledger().is_lossy is True
+    assert result.ledger().count("dropped_islet") == 1
 
     written = json.loads(destination.read_text(encoding="utf-8"))
     assert len(written["features"][0]["geometry"]["coordinates"]) == 1, "the islet must be gone"
@@ -102,7 +106,12 @@ def test_sub_threshold_interior_rings_are_dropped_counted_and_described(tmp_path
     assert result.dropped_holes == 1
     assert len(result.dropped_hole_details) == 1
     assert result.dropped_parts == 0
-    assert result.as_dict()["lossy"] is True
+    assert result.ledger().is_lossy is True
+    assert result.ledger().count("dropped_source_hole") == 1
+    assert result.ledger().count("dropped_islet") == 0, (
+        "a discarded interior ring and a discarded islet are different kinds; a single "
+        "'something was dropped' counter is what made them interchangeable"
+    )
 
 
 def test_a_real_enclave_is_kept(tmp_path: Path) -> None:
@@ -116,7 +125,7 @@ def test_a_real_enclave_is_kept(tmp_path: Path) -> None:
     result = normalize_geoboundaries(source, destination, "TR")
 
     assert result.dropped_holes == 0
-    assert result.as_dict()["lossy"] is False
+    assert result.ledger().is_lossy is False
     written = json.loads(destination.read_text(encoding="utf-8"))
     assert len(written["features"][0]["geometry"]["coordinates"]) == 2
 
@@ -126,10 +135,13 @@ def test_a_lossless_normalization_reports_itself_as_lossless(tmp_path: Path) -> 
 
     record = normalize_geoboundaries(source, tmp_path / "n.geojson", "TR").as_dict()
 
-    assert record["lossy"] is False
-    assert record["droppedParts"] == 0
-    assert record["droppedPartDetails"] == []
-    assert record["droppedHoles"] == 0
+    assert record["loss"]["lossy"] is False
+    assert record["loss"]["events"] == [], (
+        "an empty ledger, not a set of zero counters: there is nothing to under-report"
+    )
+    assert record["loss"]["stagesRecorded"] == ["upstream"], (
+        "this step can only speak for itself, and has to say so"
+    )
 
 
 def test_the_source_file_is_never_modified(tmp_path: Path) -> None:
@@ -183,22 +195,59 @@ def test_a_document_without_features_is_rejected(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------------------------
 # check_lod_report
+#
+# Written as **mutations of a healthy report**: each one takes a report that passes, breaks
+# exactly one thing, and asserts the checker now objects. The mutations were chosen by taking a
+# real report and breaking it until CI stayed green — every one below was green at some point.
 # --------------------------------------------------------------------------------------------
 
-_NORMALIZATION = {
-    "featureCount": 81,
-    "sourceCountryCode": "TUR",
-    "countryCode": "TR",
-    "countryCodesRewritten": 81,
-    "droppedParts": 7,
-    "droppedPartDetails": [f"islet {index}" for index in range(7)],
-    "droppedHoles": 0,
-    "droppedHoleDetails": [],
-    "lossy": True,
-}
+_ORIGIN_AREA = 784_232_074_335.0
+"""The 81 provinces in local metres, so the mutations argue with realistic magnitudes."""
 
 
-def _simplification(lod: str, parts: int, dropped_area: float = 0.0) -> dict[str, Any]:
+def _event(
+    kind: str, count: int, area: float = 0.0, stage: str = "simplification"
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "kind": kind,
+        "count": count,
+        "area": area,
+        "details": [f"{kind} {index}" for index in range(count)]
+        if kind_of(kind).needs_detail
+        else [],
+    }
+
+
+_UPSTREAM_EVENTS = [_event("dropped_islet", 7, stage="upstream")]
+
+
+def _ledger(events: list[dict[str, Any]], lossy: bool | None = None) -> dict[str, Any]:
+    """A serialised ledger. ``lossy`` defaults to the truth so a mutation has to state its lie."""
+    derived = any(kind_of(item["kind"]).category == "loss" for item in events)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "stages": list(STAGES),
+        "stagesRecorded": list(STAGES),
+        "events": events,
+        "removedArea": sum(
+            item["area"] for item in events if kind_of(item["kind"]).side == "removed"
+        ),
+        "addedArea": sum(item["area"] for item in events if kind_of(item["kind"]).side == "added"),
+        "lossy": derived if lossy is None else lossy,
+    }
+
+
+def _simplification(
+    lod: str,
+    parts: int,
+    events: list[dict[str, Any]],
+    holes: int = 0,
+    source_holes: int = 0,
+    dropped_area: float = 0.0,
+) -> dict[str, Any]:
+    removed = sum(item["area"] for item in events if kind_of(item["kind"]).side == "removed")
+    added = sum(item["area"] for item in events if kind_of(item["kind"]).side == "added")
     return {
         "lod": lod,
         "tolerance": 0.0005,
@@ -206,38 +255,83 @@ def _simplification(lod: str, parts: int, dropped_area: float = 0.0) -> dict[str
         "vertexCount": 100_000,
         "sourcePartCount": 705,
         "partCount": parts,
-        "sourceHoleCount": 0,
-        "holeCount": 0,
+        "sourceHoleCount": source_holes,
+        "holeCount": holes,
         "droppedPartArea": dropped_area,
         "largestDroppedPartArea": dropped_area,
         "droppedParts": [],
-        "topologyChanges": {"merges": 0, "splits": 0, "netPartChange": 0, "regions": []},
-        "skippedParts": 0,
-        "skippedRings": 0,
-        "degenerateTriangles": 0,
+        "areaBudget": {
+            "sourceArea": _ORIGIN_AREA,
+            "outputArea": _ORIGIN_AREA + added - removed,
+            "removedArea": removed,
+            "addedArea": added,
+            "retainedAreaRatio": (_ORIGIN_AREA - removed) / _ORIGIN_AREA,
+            "minPartRetainedAreaRatio": 0.156,
+            "severeShrinkParts": 23,
+        },
+        "topologyChanges": {
+            "merges": sum(item["count"] for item in events if item["kind"] == "part_merge"),
+            "splits": sum(item["count"] for item in events if item["kind"] == "part_split"),
+            "created": sum(item["count"] for item in events if item["kind"] == "part_created"),
+            "droppedHoles": sum(item["count"] for item in events if item["kind"] == "dropped_hole"),
+            "netPartChange": 0,
+            "mergeAddedArea": 0.0,
+            "regions": [],
+        },
+        "topologyChanged": False,
+        "loss": _ledger(events),
     }
 
 
-def _level(lod: str, vertices: int, parts: int, dropped_area: float = 0.0) -> dict[str, Any]:
-    simplification = _simplification(lod, parts, dropped_area)
+def _level(
+    lod: str,
+    vertices: int,
+    parts: int,
+    events: list[dict[str, Any]],
+    holes: int = 0,
+    source_holes: int = 0,
+    dropped_area: float = 0.0,
+) -> dict[str, Any]:
+    simplification = _simplification(
+        lod, parts, events, holes=holes, source_holes=source_holes, dropped_area=dropped_area
+    )
+    all_events = events + _UPSTREAM_EVENTS
+    unsafe = any(
+        item["kind"] in ("part_merge", "part_created", "dropped_hole", "dropped_part")
+        for item in events
+    )
     return {
         "territoryCount": 81,
         "vertices": vertices,
         "triangles": vertices - 1_000,
         "bytes": vertices * 14,
         "simplification": simplification,
-        "loss": {
-            "triangulation": {
-                "skippedParts": 0,
-                "skippedRings": 0,
-                "degenerateTriangles": 0,
-            },
-            "simplification": simplification,
-            "upstream": dict(_NORMALIZATION),
-            "lossy": True,
-        },
-        "lossy": True,
+        "loss": _ledger(all_events),
+        "lossy": any(kind_of(item["kind"]).category == "loss" for item in all_events),
+        "topologyChanged": unsafe or any(item["kind"] == "part_split" for item in events),
+        "pickingUnsafe": unsafe,
     }
+
+
+_HIGH_EVENTS: list[dict[str, Any]] = [
+    _event("boundary_retreat", 81, 4_859_841.0),
+    _event("boundary_advance", 81, 5_276_764.0),
+]
+_MEDIUM_EVENTS: list[dict[str, Any]] = [
+    _event("boundary_retreat", 81, 139_961_441.0),
+    _event("boundary_advance", 81, 143_109_355.0),
+    _event("dropped_part", 1, 684.6),
+    _event("part_merge", 3, 15_906_005.0),
+    _event("part_split", 3, 553.9),
+]
+_LOW_EVENTS: list[dict[str, Any]] = [
+    _event("boundary_retreat", 81, 1_236_362_656.0),
+    _event("boundary_advance", 80, 1_087_133_554.0),
+    _event("dropped_part", 1, 684.6),
+    _event("part_merge", 30, 269_842_393.0),
+    _event("part_split", 11, 23_882.8),
+    _event("artifact_hole_removed", 22, 11_636.3),
+]
 
 
 def _healthy_report() -> dict[str, Any]:
@@ -247,11 +341,27 @@ def _healthy_report() -> dict[str, Any]:
         "buildDate": "2026-01-01T00:00:00Z",
         "country": "TR",
         "adminLevel": "ADM1",
-        "normalization": dict(_NORMALIZATION),
+        "normalization": {
+            "featureCount": 81,
+            "sourceCountryCode": "TUR",
+            "countryCode": "TR",
+            "countryCodesRewritten": 81,
+            "loss": {
+                "schemaVersion": SCHEMA_VERSION,
+                "stages": list(STAGES),
+                "stagesRecorded": ["upstream"],
+                "events": copy.deepcopy(_UPSTREAM_EVENTS),
+                "removedArea": 0.0,
+                "addedArea": 0.0,
+                "lossy": True,
+            },
+        },
         "levels": {
-            "high": _level("high", 240_379, 705),
-            "medium": _level("medium", 85_926, 704),
-            "low": _level("low", 30_753, 685, dropped_area=684.6),
+            "high": _level("high", 240_379, 705, copy.deepcopy(_HIGH_EVENTS)),
+            "medium": _level(
+                "medium", 85_926, 704, copy.deepcopy(_MEDIUM_EVENTS), dropped_area=684.6
+            ),
+            "low": _level("low", 30_753, 685, copy.deepcopy(_LOW_EVENTS), dropped_area=684.6),
         },
         "vertexRatioToHigh": {"high": 1.0, "medium": 0.357, "low": 0.128},
     }
@@ -262,56 +372,190 @@ def test_the_healthy_report_passes() -> None:
     assert check(_healthy_report()) == []
 
 
-def test_a_count_with_no_details_behind_it_is_caught() -> None:
-    """Mutation 1: droppedParts=7, droppedPartDetails=[]. Passed CI before this round.
+# ---- the mutation that gave this round its blocker ----------------------------------------
 
-    A bare count cannot be reviewed by a human: seven of what, in which province, how big?
+
+def test_a_vanished_source_hole_with_no_record_is_caught() -> None:
+    """B1, on the CI side. One source hole in, none out, and nothing recorded.
+
+    This is the exact counterexample: a Polygon with one real enclave whose output has the same
+    exterior ring and no enclave. Every earlier version of this script only asked whether
+    ``holeCount > sourceHoleCount`` — whether a hole had been *invented* — so a hole that was
+    subtracted produced ``droppedHoles: 0``, ``lossy: false`` and an empty failure list.
     """
     report = _healthy_report()
-    report["normalization"]["droppedPartDetails"] = []
-    report["levels"]["high"]["loss"]["upstream"]["droppedPartDetails"] = []
+    report["levels"]["low"]["simplification"]["sourceHoleCount"] = 1
+    report["levels"]["low"]["simplification"]["holeCount"] = 0
 
     failures = check(report)
 
-    assert any("droppedParts" in failure and "lists 0" in failure for failure in failures), failures
+    assert any("hole count moved by 1" in failure for failure in failures), failures
+
+
+def test_a_vanished_source_hole_that_is_recorded_passes() -> None:
+    """The other direction: recorded properly, the same geometry is a legitimate report.
+
+    Without this, the check above could be satisfied by rejecting every report whose hole count
+    moved, which would make the level unbuildable rather than honest.
+    """
+    report = _healthy_report()
+    simplification = report["levels"]["low"]["simplification"]
+    simplification["sourceHoleCount"] = 1
+    simplification["holeCount"] = 0
+    hole = _event("dropped_hole", 1, 40_000.0)
+
+    for events in (simplification["loss"]["events"], report["levels"]["low"]["loss"]["events"]):
+        events.append(copy.deepcopy(hole))
+    _refresh(report, "low")
+
+    assert check(report) == []
+
+
+def _refresh(report: dict[str, Any], lod: str) -> None:
+    """Recompute the derived halves of a level after mutating its events.
+
+    A mutation is supposed to break one thing. Without this, appending an event would also make
+    the area budget, the topologyChanges block and the flags disagree, and the test would pass on
+    whichever failure the checker happened to report first.
+    """
+    level = report["levels"][lod]
+    simplification = level["simplification"]
+    events = simplification["loss"]["events"]
+    removed = sum(item["area"] for item in events if kind_of(item["kind"]).side == "removed")
+    added = sum(item["area"] for item in events if kind_of(item["kind"]).side == "added")
+    source = simplification["areaBudget"]["sourceArea"]
+    simplification["areaBudget"].update(
+        {
+            "outputArea": source + added - removed,
+            "removedArea": removed,
+            "addedArea": added,
+            "retainedAreaRatio": (source - removed) / source,
+        }
+    )
+    simplification["loss"].update({"removedArea": removed, "addedArea": added})
+    simplification["topologyChanges"].update(
+        {
+            "merges": sum(item["count"] for item in events if item["kind"] == "part_merge"),
+            "splits": sum(item["count"] for item in events if item["kind"] == "part_split"),
+            "created": sum(item["count"] for item in events if item["kind"] == "part_created"),
+            "droppedHoles": sum(item["count"] for item in events if item["kind"] == "dropped_hole"),
+        }
+    )
+    all_events = level["loss"]["events"]
+    level["lossy"] = any(kind_of(item["kind"]).category == "loss" for item in all_events)
+    level["loss"]["lossy"] = level["lossy"]
+    unsafe = any(
+        item["kind"] in ("part_merge", "part_created", "dropped_hole", "dropped_part")
+        for item in events
+    )
+    level["pickingUnsafe"] = unsafe
+    level["topologyChanged"] = unsafe or any(item["kind"] == "part_split" for item in events)
+
+
+# ---- the naming convention this round removed --------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["removedRings", "collapsedParts", "discarded_holes"])
+def test_an_event_kind_outside_the_schema_fails_ci(kind: str) -> None:
+    """The fourth review round's finding: the convention decided by *name*.
+
+    ``removedRings`` matched the prefix list and set the flag; ``collapsedParts`` and
+    ``discarded_holes`` describe the same kind of event in words nobody had listed, so they read
+    as "nothing happened" and CI accepted both. Now an unrecognised kind is a failure, whichever
+    way it is spelled — including the way that used to work.
+    """
+    report = _healthy_report()
+    report["levels"]["low"]["loss"]["events"].append(
+        {"stage": "simplification", "kind": kind, "count": 4, "details": ["a", "b", "c", "d"]}
+    )
+
+    failures = check(report)
+
+    assert any("unknown loss event kind" in failure for failure in failures), failures
+
+
+def test_a_report_written_against_the_old_schema_is_refused() -> None:
+    """The prefix-convention block was version 1. A checker that guesses is one that misreads."""
+    report = _healthy_report()
+    report["levels"]["high"]["loss"] = {
+        "droppedParts": 0,
+        "droppedPartDetails": [],
+        "lossy": False,
+    }
+
+    failures = check(report)
+
+    assert any("schemaVersion" in failure for failure in failures), failures
+
+
+def test_the_schema_is_shared_with_the_build_rather_than_copied() -> None:
+    """Y2: one definition, two derivations.
+
+    The previous version kept its own copy of the loss-record rule and argued the duplication was
+    the point. It was not: the copies could drift, and a checker that has drifted the same way as
+    the build agrees with it for the wrong reason. What stays independent is the derivation —
+    every ``lossy`` flag, every identity and every area sum in this script is recomputed here.
+    """
+    from geometry_api import loss as build_side
+
+    assert check_lod_report.SCHEMA_VERSION is build_side.SCHEMA_VERSION
+    assert check_lod_report.STAGES is build_side.STAGES
+    assert not any(
+        name.endswith("_PREFIXES") or "PREFIX" in name for name in vars(check_lod_report)
+    ), "a prefix list here is a second copy of the schema, whatever it is called"
+
+
+# ---- the mutations from the previous round, still caught ----------------------------------
+
+
+def test_a_count_with_no_details_behind_it_is_caught() -> None:
+    """Mutation 1: a loss count with nothing a reviewer could look up.
+
+    Seven of what, in which province, how big? The schema marks which kinds owe detail, so this
+    is now refused at the point the event is parsed rather than by a bespoke check.
+    """
+    report = _healthy_report()
+    report["levels"]["low"]["loss"]["events"] = [
+        item if item["kind"] != "dropped_islet" else {**item, "details": []}
+        for item in report["levels"]["low"]["loss"]["events"]
+    ]
+
+    failures = check(report)
+
+    assert any("cannot be reviewed" in failure for failure in failures), failures
 
 
 def test_a_negative_loss_count_is_caught() -> None:
-    """Mutation 2: droppedParts=-7 with lossy=true. Passed CI before this round.
-
-    A negative count reads as "something happened" to a truthiness test and cancels real losses
-    out of any total, which is the worst of both.
-    """
+    """Mutation 2: a negative count, which arithmetic on any total silently absorbs."""
     report = _healthy_report()
-    report["normalization"]["droppedParts"] = -7
-    report["normalization"]["droppedPartDetails"] = []
-    for lod in ("high", "medium", "low"):
-        report["levels"][lod]["loss"]["upstream"]["droppedParts"] = -7
-        report["levels"][lod]["loss"]["upstream"]["droppedPartDetails"] = []
+    report["levels"]["low"]["loss"]["events"].append(
+        {"stage": "simplification", "kind": "dropped_part", "count": -7, "details": []}
+    )
 
     failures = check(report)
 
-    assert any("cannot be negative" in failure for failure in failures), failures
+    assert any("not a smaller loss" in failure for failure in failures), failures
 
 
-def test_a_level_missing_its_upstream_block_is_caught() -> None:
-    """Mutation 3: no per-level loss.upstream at all, aggregate lossy=true. Passed CI before.
-
-    ``build_lod.py`` copied only the flag out of each manifest, so this was not even a mutation —
-    it was the actual shape of every report the chain produced.
-    """
+def test_a_level_that_never_asked_a_stage_is_caught() -> None:
+    """Mutation 3: no upstream records at all. This was the actual shape of every early report."""
     report = _healthy_report()
-    for lod in ("high", "medium", "low"):
-        del report["levels"][lod]["loss"]["upstream"]
+    for lod in LOD_LEVELS:
+        loss = report["levels"][lod]["loss"]
+        loss["stagesRecorded"] = ["simplification", "triangulation"]
+        loss["events"] = [item for item in loss["events"] if item["stage"] != "upstream"]
+        report["levels"][lod]["lossy"] = loss["lossy"] = any(
+            kind_of(item["kind"]).category == "loss" for item in loss["events"]
+        )
 
     failures = check(report)
 
-    assert any("missing stage(s) upstream" in failure for failure in failures), failures
+    assert any("no records at all from stage(s) upstream" in f for f in failures), failures
 
 
 def test_a_level_with_no_loss_block_at_all_is_caught() -> None:
     report = _healthy_report()
-    for lod in ("high", "medium", "low"):
+    for lod in LOD_LEVELS:
         del report["levels"][lod]["loss"]
 
     failures = check(report)
@@ -319,33 +563,37 @@ def test_a_level_with_no_loss_block_at_all_is_caught() -> None:
     assert any("carries no 'loss' block" in failure for failure in failures), failures
 
 
-def test_a_lossy_flag_that_contradicts_its_own_records_is_caught() -> None:
-    """In both directions: a false flag over real records, and a true flag over none."""
+def test_a_lossy_flag_that_contradicts_its_own_events_is_caught() -> None:
+    """In both directions: a false flag over real events, and a true flag over none."""
     understated = _healthy_report()
-    understated["normalization"]["lossy"] = False
-    assert any("records are what happened" in f for f in check(understated))
+    understated["levels"]["low"]["lossy"] = False
+    assert any("the events are what happened" in f for f in check(understated))
 
+    # For the other direction the level has to have no loss events at all, which means an
+    # upstream step that dropped nothing — the stage is still asked, it just has nothing to say.
     overstated = _healthy_report()
-    overstated["normalization"] = {
-        "featureCount": 81,
-        "countryCodesRewritten": 0,
-        "droppedParts": 0,
-        "droppedPartDetails": [],
-        "droppedHoles": 0,
-        "droppedHoleDetails": [],
-        "lossy": True,
-    }
-    assert any("records are what happened" in f for f in check(overstated))
+    overstated["normalization"]["loss"]["events"] = []
+    overstated["normalization"]["loss"]["lossy"] = False
+    for lod in LOD_LEVELS:
+        loss = overstated["levels"][lod]["loss"]
+        loss["events"] = [item for item in loss["events"] if item["stage"] != "upstream"]
+        overstated["levels"][lod]["lossy"] = loss["lossy"] = any(
+            kind_of(item["kind"]).category == "loss" for item in loss["events"]
+        )
+    assert check(overstated) == [], "a lossless upstream is a legitimate report"
+
+    overstated["levels"]["high"]["loss"]["lossy"] = True
+    overstated["levels"]["high"]["lossy"] = True
+    assert any("the events are what happened" in f for f in check(overstated))
 
 
-def test_an_upstream_block_that_disagrees_with_the_normalization_is_caught() -> None:
+def test_a_normalization_that_disagrees_with_the_levels_is_caught() -> None:
     report = _healthy_report()
-    report["levels"]["low"]["loss"]["upstream"]["droppedParts"] = 3
-    report["levels"]["low"]["loss"]["upstream"]["droppedPartDetails"] = ["a", "b", "c"]
+    report["normalization"]["loss"]["events"] = [_event("dropped_islet", 3, stage="upstream")]
 
     failures = check(report)
 
-    assert any("disagrees with the normalization block" in failure for failure in failures)
+    assert any("disagree with the normalization block" in failure for failure in failures)
 
 
 def test_cumulative_dropped_area_over_the_ceiling_is_caught() -> None:
@@ -353,7 +601,6 @@ def test_cumulative_dropped_area_over_the_ceiling_is_caught() -> None:
     report = _healthy_report()
     report["levels"]["low"]["simplification"]["droppedPartArea"] = 60_000.0
     report["levels"]["low"]["simplification"]["largestDroppedPartArea"] = 9_000.0
-    report["levels"]["low"]["loss"]["simplification"] = report["levels"]["low"]["simplification"]
 
     failures = check(report)
 
@@ -375,8 +622,83 @@ def test_the_existing_ladder_expectations_still_hold() -> None:
     high_loss["levels"]["high"]["simplification"]["partCount"] = 700
     assert any("must preserve the source" in f for f in check(high_loss))
 
-    silent = copy.deepcopy(_healthy_report())
-    for lod in ("high", "medium", "low"):
+    silent = _healthy_report()
+    for lod in LOD_LEVELS:
         silent["levels"][lod]["lossy"] = False
         silent["levels"][lod]["loss"]["lossy"] = False
     assert any("report lossy=false" in f for f in check(silent))
+
+
+# ---- the identities, checked here as well as in the build ---------------------------------
+
+
+def test_an_area_budget_that_does_not_balance_is_caught() -> None:
+    """The level's own numbers, re-added here. A build can compute an identity and serialise
+    something else; this is what makes the written report the thing under contract."""
+    report = _healthy_report()
+    report["levels"]["low"]["simplification"]["areaBudget"]["outputArea"] += 5_000_000.0
+
+    failures = check(report)
+
+    assert any("area budget does not balance" in failure for failure in failures), failures
+
+
+def test_an_area_total_that_disagrees_with_its_events_is_caught() -> None:
+    report = _healthy_report()
+    report["levels"]["low"]["simplification"]["areaBudget"]["removedArea"] += 1_000_000.0
+
+    failures = check(report)
+
+    assert any("areaBudget.removedArea" in failure for failure in failures), failures
+
+
+def test_a_part_count_the_events_do_not_account_for_is_caught() -> None:
+    report = _healthy_report()
+    report["levels"]["low"]["simplification"]["partCount"] = 690
+
+    failures = check(report)
+
+    assert any("part count moved by" in failure for failure in failures), failures
+
+
+def test_topology_changes_drifting_from_the_events_is_caught() -> None:
+    """The same numbers exist twice in a manifest: as events, and as the block a client reads."""
+    report = _healthy_report()
+    report["levels"]["low"]["simplification"]["topologyChanges"]["merges"] = 12
+
+    failures = check(report)
+
+    assert any("topologyChanges.merges is 12" in failure for failure in failures), failures
+
+
+def test_a_level_claiming_picking_is_safe_after_merging_parts_is_caught() -> None:
+    """Ö5: the flag phases 4 and 5 gate on cannot be an opinion."""
+    report = _healthy_report()
+    report["levels"]["low"]["pickingUnsafe"] = False
+
+    failures = check(report)
+
+    assert any("pickingUnsafe is False" in failure for failure in failures), failures
+
+
+def test_a_level_with_no_client_flags_is_caught() -> None:
+    report = _healthy_report()
+    del report["levels"]["medium"]["pickingUnsafe"]
+
+    failures = check(report)
+
+    assert any("nothing to gate picking on" in failure for failure in failures), failures
+
+
+def test_high_recording_any_simplification_loss_is_caught() -> None:
+    """high is the level that claims to still be the source geometry."""
+    report = _healthy_report()
+    report["levels"]["high"]["loss"]["events"].append(_event("dropped_part", 1, 500.0))
+    report["levels"]["high"]["simplification"]["loss"]["events"].append(
+        _event("dropped_part", 1, 500.0)
+    )
+    _refresh(report, "high")
+
+    failures = check(report)
+
+    assert any("high recorded loss in simplification" in failure for failure in failures), failures

@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from geometry_api.loss import STAGE_UPSTREAM, LossLedger, event
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TERRITORY_CLI = REPO_ROOT / "vendor" / "territorykit" / "packages" / "cli" / "dist" / "index.mjs"
 GEOMETRY_API = REPO_ROOT / "services" / "geometry-api"
@@ -79,29 +81,50 @@ class Normalization:
     exists before anyone has to go looking for it.
     """
 
-    def as_dict(self) -> dict[str, Any]:
-        """The loss records first, then a ``lossy`` derived from them and from nothing else.
+    def ledger(self) -> LossLedger:
+        """What this step removed, as typed events against the schema in ``geometry_api.loss``.
 
-        Mirrors ``geometry_api.loss.derive_lossy`` rather than importing it: this script runs the
-        geometry package as a subprocess precisely so it does not depend on it being importable
-        here. The duplication is not left to trust — ``scripts/check_lod_report.py`` recomputes
-        the flag from the same records and fails CI if the two ever disagree, and nothing
-        downstream reads this boolean to decide anything (``collect_loss`` ignores it and looks
-        at the counts).
+        The schema is **imported**, not mirrored. An earlier version of this script kept its own
+        copy of the rule for what counted as a loss — a list of key-name prefixes — with a comment
+        explaining that the duplication was safe because ``scripts/check_lod_report.py`` kept a
+        third copy and would notice a disagreement. Three copies of a rule is not a
+        cross-check, it is three places to forget. The schema now lives in exactly one module and
+        every producer and checker reads it from there; what stays independent is the
+        *derivation*, which the checker still recomputes from the events rather than trusting the
+        flag written here.
+
+        No areas. This step measures rings in square degrees, and a square degree is not a unit
+        anyone can judge an islet by; the local-metre figures (2.0 to 6.1 m² for the seven
+        geoBoundaries islets) need a projection origin that only exists after the import. The
+        detail strings carry the degree² area so nothing is unrecoverable, and the level budgets
+        downstream are measured on geometry this step has already finished with.
         """
-        records: dict[str, Any] = {
-            "droppedParts": self.dropped_parts,
-            "droppedPartDetails": self.dropped_part_details,
-            "droppedHoles": self.dropped_holes,
-            "droppedHoleDetails": self.dropped_hole_details,
-        }
+        return LossLedger.of(
+            [
+                event(
+                    STAGE_UPSTREAM,
+                    "dropped_islet",
+                    count=self.dropped_parts,
+                    details=self.dropped_part_details,
+                ),
+                event(
+                    STAGE_UPSTREAM,
+                    "dropped_source_hole",
+                    count=self.dropped_holes,
+                    details=self.dropped_hole_details,
+                ),
+            ],
+            stages_recorded=[STAGE_UPSTREAM],
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """What normalization did, with the ledger under ``loss`` where every stage keeps it."""
         return {
             "featureCount": self.feature_count,
             "sourceCountryCode": self.source_country_code,
             "countryCode": self.country_code,
             "countryCodesRewritten": self.country_codes_rewritten,
-            **records,
-            "lossy": any(bool(value) for value in records.values()),
+            "loss": self.ledger().as_manifest_dict(),
         }
 
 
@@ -367,6 +390,10 @@ def main(argv: list[str] | None = None) -> int:
                 # counts contradicted its own boolean, and CI would pass.
                 "loss": manifest["loss"],
                 "lossy": manifest["lossy"],
+                # The two flags phases 4 and 5 gate picking on. In the report as well as the
+                # manifest so CI can check they agree with the events behind them.
+                "topologyChanged": manifest["topologyChanged"],
+                "pickingUnsafe": manifest["pickingUnsafe"],
             }
             print(
                 f"built lod '{lod}': {manifest['totals']['vertices']} vertices, "
