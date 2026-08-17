@@ -133,22 +133,54 @@ Aynı formül (kaynak: 57.978 ortak segment), çatlak ürettiği ölçülen Terr
 Sayılar neredeyse aynı. Metrik doğru çıktıyla bozuk çıktıyı **ayırt etmiyor**, dolayısıyla
 bir topoloji denetimi olarak kullanılamaz.
 
-**Hangi aşamanın hangi sayıyı verdiği** (önceki taslak burayı yanlış adlandırıyordu): `low`
-seviyesinde ham topojson sadeleştirici çıktısı **47.357**; bu çıktının 13 geometrisi geçersiz.
-Onarılmış ve çatlağı sıfır olarak ölçülmüş **nihai boru hattı çıktısı 47.358** veriyor. İkisi
-arasındaki 1'lik fark önemsiz — önemli olan **her iki değerin de** TerritoryKit'in 48.204'üne
-yakın olması. Metrik, çatlak üreten çıktıyla üretmeyeni ayırt edemiyor.
+#### Hangi sayı hangi aşamaya ait
 
-Küçük bir ek fark: TerritoryKit'in kendi raporu `low` için 48.204 yazıyor, aynı formül yazdığı
-`dataset.json` üzerinden yeniden hesaplandığında 48.200 çıkıyor. Fark JSON'a yazılırken oluşan
-yuvarlamadan geliyor; betik ikisini de basıyor ki bu 4'lük fark "tekrar üretilemedi" gibi
-okunmasın.
+Bu tablodaki **her sayı poligon katmanına aittir**, mesh'e değil. `low` seviyesinde:
+
+| Aşama | `sharedBoundaryMismatchCount` | Geçersiz geometri |
+|---|---|---|
+| Ham topojson sadeleştirici çıktısı | 47.357 | 13 |
+| **`make_valid` sonrası poligon** (`_simplify_geometries`'in döndürdüğü şey) | **47.358** | 0 |
+| TerritoryKit `geometry simplify` | 48.204 (kendi raporu) / 48.200 (yazdığı JSON'dan yeniden hesap) | 23 |
+
+İki düzeltme, önceki taslakta yanlış olan iki nokta:
+
+1. **47.358 "nihai boru hattı çıktısı" DEĞİL.** `make_valid` uygulanmış **poligon** katmanıdır.
+   Bu belge ve tekrar üretme betiği poligon üzerinde ölçüm yapar; üçgenleme ve float32 sonrası
+   mesh'e hiç dokunmaz.
+2. **Mesh'te sıfır çatlak iddiası bu sayıyla kanıtlanmıyor.** O iddia ayrı bir ölçümdür:
+   `services/geometry-api/tests/test_lod.py`, üç seviyenin her birinde TKMS'e encode edip
+   **decode ettikten sonra** 81 ilin birleşimindeki iç halka alanını ve çift bazlı çakışmayı
+   ölçer; ikisi de tam 0,0. Tekrar üretme betiği o adımı çalıştırmaz ve çalıştırdığını iddia
+   etmez — çıktısında bunu söyleyen bir not basar.
+
+Önemli olan **her üç poligon değerinin de** birbirine yakın olması: metrik, çatlak ürettiği
+ölçülen çıktıyı (32/197 çift, `high`) hiç üretmeyeninden (0/197) ayırt edemiyor.
+
+Küçük bir ek fark: TerritoryKit'in kendi raporu `low` için **48.204** yazıyor, aynı formül yazdığı
+`dataset.json` üzerinden yeniden hesaplandığında **48.200** çıkıyor. Denetim bellekteki geometri
+üzerinde koşuyor, yeniden hesap ise JSON'a daha az hassasiyetle serileştirilmiş koordinatlar
+üzerinde; 4'lük fark buradan geliyor ve bulguyla ilgisi yok (iki değer de çatlaksız bir
+sadeleştiricinin ~47,4k'sının çok üstünde). Betik **ikisini de** basıyor ki bu fark "tekrar
+üretilemedi" gibi okunmasın.
 
 ### İkinci sorun — sessiz başarı
 
 `geometry simplify`, `sharedBoundaryMismatchCount: 48204` yazarken **ve** çıktısında 23 geçersiz
 geometri varken `ok: true`, `issues: []` ve çıkış kodu **0** dönüyor. Otomatik bir boru hattı için
 bu, bozuk çıktının sessizce geçmesi demek.
+
+Bu, Issue B'nin **ana kanıtı**, o yüzden betik CLI'ın stdout'unu artık özetlemiyor; üç değeri de
+olduğu gibi basıyor. `low` için gerçek çıktı:
+
+```
+  territorykit invalid=23  affected=161/197
+               gap=58.0872 km²  overlap=68.2447 km²  sharedBoundaryMismatchCount=48200
+  CLI verdict  exit code=0  ok=true  issues=[]
+```
+
+(Önceki taslakta betik bu JSON'u okuyup atıyordu, dolayısıyla iddianın arkasında basılı bir
+kanıt yoktu.)
 
 ### Öneri
 
@@ -162,6 +194,14 @@ Issue A ile aynı komut; `sharedBoundaryMismatchCount` satırları hem Territory
 için, üç seviyede de basılıyor. Formülün Python karşılığı betikte
 `_shared_segment_count` içinde, `geometry-simplification.ts`'teki `collectSharedSegments` ile
 koordinat koordinat aynı (9 ondalık, yön bağımsız anahtar).
+
+CLI'ın kendi cevabı (`exit code`, `ok`, `issues`) her seviye için `CLI verdict` satırında
+basılıyor. Mesh üzerindeki sıfır çatlak ölçümü bu betikte **değil**:
+
+```bash
+cd services/geometry-api
+pytest tests/test_lod.py -k cracks -q
+```
 
 ---
 
@@ -189,4 +229,10 @@ Sadeleştirme `topojson`'a devredildi (`services/geometry-api/src/geometry_api/s
 TerritoryKit zincirden çıkmadı: dataset şeması ve `import geoboundaries` adımı hâlâ kullanılıyor.
 Değişen yalnızca ölçülerek çalışmadığı gösterilen adım.
 
-**Issue'lar henüz açılmadı** — onay bekliyor. Tekrar üretme hazır ve çalışıyor.
+**Issue'lar henüz açılmadı** — onay bekliyor. Tekrar üretme hazır ve çalışıyor; her iki issue'nun
+her sayısı tek komuttan çıkıyor.
+
+| Issue | Durum | 4. tur değişikliği |
+|---|---|---|
+| A — `topology-safe` ring bazlı çalışıyor | Gönderilebilir | Yok, dokunulmadı |
+| B — `topologyAudit` denetim yapmıyor | Gönderilebilir | 47.358'in **`make_valid` sonrası poligon** olduğu düzeltildi; mesh/float32 iddiası ayrı ölçüm olarak ayrıştırıldı; betik CLI'ın `exit code` / `ok` / `issues` cevabını artık basıyor; 48.204 ↔ 48.200 farkı açıklandı |

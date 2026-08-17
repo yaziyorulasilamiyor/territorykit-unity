@@ -224,19 +224,43 @@ def normalize_geoboundaries(source: Path, destination: Path, country: str) -> No
     )
 
 
-def run_step(command: list[str], step: str, cwd: Path | None = None) -> str:
-    """Run a subprocess and turn a failure into a message that says which step broke."""
+@dataclass(frozen=True)
+class StepResult:
+    """What a subprocess said, including its exit code when that is the finding.
+
+    ``run_step`` raises on a non-zero exit, which is right for the build chain and wrong for
+    ``scripts/repro_territorykit_finding.py``: Issue B is that ``geometry simplify`` returns
+    ``ok: true``, ``issues: []`` and exit code 0 while shipping 23 invalid geometries. A wrapper
+    that only surfaces the exit code by raising on it cannot show that.
+    """
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run_step_raw(command: list[str], step: str, cwd: Path | None = None) -> StepResult:
+    """Run a subprocess and hand back everything it said, exit code included."""
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, encoding="utf-8", check=False, cwd=cwd
         )
     except OSError as exc:
         raise BuildLodError(f"{step}: could not run {command[0]}: {exc}") from exc
+    return StepResult(
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
 
-    if completed.returncode != 0:
-        output = (completed.stdout or "") + (completed.stderr or "")
-        raise BuildLodError(f"{step} failed (exit {completed.returncode}):\n{output.strip()}")
-    return completed.stdout
+
+def run_step(command: list[str], step: str, cwd: Path | None = None) -> str:
+    """Run a subprocess and turn a failure into a message that says which step broke."""
+    result = run_step_raw(command, step, cwd=cwd)
+    if result.returncode != 0:
+        output = result.stdout + result.stderr
+        raise BuildLodError(f"{step} failed (exit {result.returncode}):\n{output.strip()}")
+    return result.stdout
 
 
 def import_dataset(normalized: Path, output: Path, country: str, level: str, date: str) -> Path:

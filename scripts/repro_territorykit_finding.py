@@ -37,7 +37,7 @@ from build_lod import (
     BuildLodError,
     import_dataset,
     normalize_geoboundaries,
-    run_step,
+    run_step_raw,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -193,19 +193,47 @@ def _load_zone_geometries(dataset_path: Path) -> dict[str, Any]:
 _invalid_names: set[str] = set()
 
 
-def _simplify_with_territorykit(
-    dataset: Path, work: Path, detail: str
-) -> tuple[dict[str, Any], int]:
-    """Returns the simplified geometries and the audit number TerritoryKit reports about itself.
+@dataclass(frozen=True)
+class TerritoryKitRun:
+    """One ``geometry simplify`` run: what it produced, and what it said about itself."""
 
-    Its own number is printed next to the recomputed one because they differ slightly (48204 vs
-    48200 at ``low``): the audit runs on the in-memory geometry, the recomputation on the
-    coordinates actually written to ``dataset.json``. The gap is a rounding artefact and is
-    irrelevant to the finding, but leaving it unexplained would look like the reproduction
-    failing to reproduce.
+    geometries: dict[str, Any]
+    self_reported_mismatch: int
+    """``topologyAudit.sharedBoundaryMismatchCount`` out of its own report."""
+    exit_code: int
+    ok: Any
+    issues: list[Any]
+
+    def print_verdict(self) -> None:
+        """Issue B's main evidence, printed verbatim rather than summarised.
+
+        Earlier versions of this script took the CLI's stdout, checked it for ``ok`` and threw it
+        away. That left the second half of Issue B — a tool reporting success over broken output —
+        as an assertion in a document with nothing behind it. These three values *are* the
+        finding, so they are printed whether or not anything went wrong.
+        """
+        print(
+            f"  {'CLI verdict':<12} exit code={self.exit_code}  ok={json.dumps(self.ok)}  "
+            f"issues={json.dumps(self.issues, ensure_ascii=False)}"
+        )
+        print(
+            f"  {'':<12} its own topologyAudit reports "
+            f"sharedBoundaryMismatchCount={self.self_reported_mismatch}"
+        )
+
+
+def _simplify_with_territorykit(dataset: Path, work: Path, detail: str) -> TerritoryKitRun:
+    """Run ``geometry simplify`` and keep its verdict alongside its output.
+
+    Its self-reported audit number is printed next to the recomputed one because they differ
+    slightly (48204 vs 48200 at ``low``): the audit runs on the in-memory geometry, the
+    recomputation on the coordinates actually written to ``dataset.json``, which are serialised at
+    lower precision. The gap is a rounding artefact and irrelevant to the finding — both numbers
+    are far above the ~47.4k a crack-free simplifier scores — but leaving it unexplained would
+    read as the reproduction failing to reproduce.
     """
     output = work / f"tk-{detail}"
-    run_step(
+    result = run_step_raw(
         [
             "node",
             str(TERRITORY_CLI),
@@ -222,13 +250,30 @@ def _simplify_with_territorykit(
         ],
         f"territory geometry simplify --detail {detail}",
     )
+    # Deliberately *not* raising on a non-zero exit or on ok:false. If the CLI ever starts
+    # reporting the problem, that is the finding being fixed, and this script should print it
+    # rather than abort. What it must never do is hide a zero exit code over broken output.
+    try:
+        verdict = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        verdict = {}
+
     produced = output / detail / "dataset.json"
     if not produced.exists():
-        raise BuildLodError(f"simplify reported success but wrote no {produced}")
+        raise BuildLodError(
+            f"simplify wrote no {produced} (exit {result.returncode}); there is nothing to "
+            f"measure:\n{(result.stdout + result.stderr).strip()}"
+        )
 
     report = json.loads((output / "simplification-report.json").read_text(encoding="utf-8"))
     tier = next(entry for entry in report["tiers"] if entry["detail"] == detail)
-    return _load_zone_geometries(produced), tier["topologyAudit"]["sharedBoundaryMismatchCount"]
+    return TerritoryKitRun(
+        geometries=_load_zone_geometries(produced),
+        self_reported_mismatch=tier["topologyAudit"]["sharedBoundaryMismatchCount"],
+        exit_code=result.returncode,
+        ok=verdict.get("ok"),
+        issues=list(verdict.get("issues", [])),
+    )
 
 
 def _simplify_with_topojson(source: dict[str, Any], detail: str) -> tuple[dict[str, Any], int]:
@@ -367,10 +412,10 @@ def main(argv: list[str] | None = None) -> int:
         for detail in details:
             print(f"\n--- {detail} ---")
             _invalid_names.clear()
-            territorykit, self_reported = _simplify_with_territorykit(dataset, args.work, detail)
+            run = _simplify_with_territorykit(dataset, args.work, detail)
             _measure(
                 "territorykit",
-                territorykit,
+                run.geometries,
                 origin,
                 pairs,
                 (left, right),
@@ -378,10 +423,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_segments,
                 list_affected=args.list_affected,
             )
-            print(
-                f"  {'':<12} TerritoryKit's own topologyAudit reports "
-                f"sharedBoundaryMismatchCount={self_reported}"
-            )
+            run.print_verdict()
 
             topojson_output, topojson_invalid = _simplify_with_topojson(source, detail)
             _measure(
@@ -392,6 +434,12 @@ def main(argv: list[str] | None = None) -> int:
                 (left, right),
                 topojson_invalid,
                 source_segments,
+            )
+            print(
+                f"  {'':<12} note: 'topojson' here is the make_valid'ed polygon layer, not the "
+                f"final mesh. The zero-crack claim for the shipped meshes is measured after "
+                f"triangulation and float32 in tests/test_lod.py; this script does not go that "
+                f"far and does not claim to."
             )
     except BuildLodError as exc:
         print(f"error: {exc}", file=sys.stderr)
