@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from geometry_api.cache import BatchCache
 
 
@@ -86,3 +88,43 @@ def test_touching_an_entry_with_get_protects_it_from_eviction(tmp_path: Path) ->
 
     assert cache.get("rev-a", "old") is not None, "touched entry should survive eviction"
     assert cache.get("rev-a", "newest") is not None
+
+
+def test_a_replace_race_where_a_concurrent_writer_already_won_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows can raise a sharing violation when two writers race os.replace onto the same
+    destination — POSIX rename has no such restriction. Since entries are content-addressed, a
+    concurrent writer landing first means the destination already holds the bytes this call was
+    about to write; that must not surface as a put() failure."""
+    import geometry_api.cache as cache_module
+
+    cache = BatchCache(tmp_path, max_bytes=1_000_000)
+    real_replace = cache_module.os.replace
+
+    def racing_replace(src: object, dst: object) -> None:
+        # This call is standing in for "another writer's os.replace already landed first".
+        real_replace(src, dst)
+        raise PermissionError("simulated concurrent-replace sharing violation")
+
+    monkeypatch.setattr(cache_module.os, "replace", racing_replace)
+
+    cache.put("rev-a", "key-1", b"the-bytes")  # must not raise
+
+    assert cache.get("rev-a", "key-1") == b"the-bytes"
+
+
+def test_a_replace_failure_with_no_winning_writer_still_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import geometry_api.cache as cache_module
+
+    cache = BatchCache(tmp_path, max_bytes=1_000_000)
+
+    def always_fails(src: object, dst: object) -> None:
+        raise PermissionError("simulated failure, nothing ever gets written")
+
+    monkeypatch.setattr(cache_module.os, "replace", always_fails)
+
+    with pytest.raises(PermissionError):
+        cache.put("rev-a", "key-1", b"the-bytes")

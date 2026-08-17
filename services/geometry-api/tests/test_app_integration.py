@@ -8,6 +8,7 @@ serve it, pointed at an isolated, throwaway published dataset.
 from __future__ import annotations
 
 import gzip
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import publish_dataset
@@ -250,3 +251,124 @@ def test_metrics_reflects_traffic_after_requests_were_made(client: tuple[TestCli
     assert snapshot["schemaVersion"] == 1
     routes = {row["route"] for row in snapshot["requests"]}
     assert "GET /v1/datasets" in routes
+
+
+# ---- error paths named in FAZ-3-PLAN.md §16.2 that the happy-path tests above don't reach ----
+
+
+def test_territories_limit_too_large_is_400(client: tuple[TestClient, str]) -> None:
+    test_client, _revision_id = client
+    response = test_client.get("/v1/datasets/fixture/territories?lod=high&limit=999999")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "limit_too_large"
+
+
+def test_territories_malformed_bbox_is_400(client: tuple[TestClient, str]) -> None:
+    test_client, _revision_id = client
+    response = test_client.get("/v1/datasets/fixture/territories?lod=high&bbox=not,a,bbox")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_bbox"
+
+
+def test_territories_cursor_reused_under_a_different_filter_is_rejected(
+    client: tuple[TestClient, str],
+) -> None:
+    test_client, _revision_id = client
+    first = test_client.get("/v1/datasets/fixture/territories?lod=high&limit=1")
+    # The fixture has only one territory, so this page is already the last one (nextCursor is
+    # None) — force a cursor to exist by asking for an impossibly small scan window instead:
+    # simplest is to build a *plausible* cursor from the other lod and reuse it here, which the
+    # filters check must reject regardless of whether it would have paginated further.
+    other_lod_cursor = test_client.get(
+        "/v1/datasets/fixture/territories?lod=medium&limit=1"
+    ).json()["items"]
+    assert first.status_code == 200 and other_lod_cursor  # sanity: both lods have the territory
+
+    from geometry_api.pagination import encode_cursor
+
+    no_filters = {"bbox": None, "parentId": None, "administrativeLevel": None}
+    mismatched_cursor = encode_cursor(first.json()["revisionId"], "medium", "T1", no_filters)
+    url = f"/v1/datasets/fixture/territories?lod=high&cursor={mismatched_cursor}"
+    response = test_client.get(url)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "cursor_filter_mismatch"
+
+
+def test_batch_too_large_is_400(client: tuple[TestClient, str]) -> None:
+    test_client, revision_id = client
+    ids = [f"T{i}" for i in range(settings.batch_max_territories + 1)]
+    response = test_client.post(
+        f"/v1/datasets/fixture/revisions/{revision_id}/mesh/batch",
+        json={"territoryIds": ids, "lod": "high"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "batch_too_large"
+
+
+def test_mesh_weak_if_none_match_still_matches(client: tuple[TestClient, str]) -> None:
+    test_client, revision_id = client
+    url = f"/v1/datasets/fixture/revisions/{revision_id}/mesh/T1?lod=high"
+    first = test_client.get(url, headers={"Accept-Encoding": "identity"})
+    weak = "W/" + first.headers["ETag"]
+
+    second = test_client.get(url, headers={"If-None-Match": weak, "Accept-Encoding": "identity"})
+
+    assert second.status_code == 304
+
+
+def test_mesh_revision_gone_is_410_through_the_real_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_dir = tmp_path / "build"
+    write_healthy_build(build_dir)
+    artifacts_dir = tmp_path / "artifacts"
+    cache_dir = tmp_path / "cache"
+    old_id = publish_dataset.publish(
+        build_dir,
+        "fixture",
+        artifacts_dir,
+        keep=1,
+        cache_dir=cache_dir,
+        published_at="2026-01-01T00:00:00Z",
+    )
+    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    publish_dataset.publish(
+        build_dir,
+        "fixture",
+        artifacts_dir,
+        keep=1,
+        cache_dir=cache_dir,
+        published_at="2026-02-01T00:00:00Z",
+    )
+    monkeypatch.setattr(settings, "artifacts_dir", str(artifacts_dir))
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+
+    from geometry_api.main import app
+
+    with TestClient(app) as test_client:
+        response = test_client.get(f"/v1/datasets/fixture/revisions/{old_id}/mesh/T1?lod=high")
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "revision_gone"
+
+
+def test_concurrent_identical_batch_requests_are_byte_identical(
+    client: tuple[TestClient, str],
+) -> None:
+    """Z21: two concurrent misses for the same key must not corrupt the cache file or disagree
+    with each other — cache.py relies on deterministic assembly + atomic rename, no lock."""
+    test_client, revision_id = client
+    url = f"/v1/datasets/fixture/revisions/{revision_id}/mesh/batch"
+    body = {"territoryIds": ["T1"], "lod": "high"}
+
+    def post() -> bytes:
+        response = test_client.post(url, json=body)
+        assert response.status_code == 200
+        return response.content
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: post(), range(8)))
+
+    assert len(set(results)) == 1, "every concurrent response must be byte-identical"
+    container = tkmb.decode_tkmb(results[0])
+    assert container.entries == {"T1": b"tkms-fixture-high"}

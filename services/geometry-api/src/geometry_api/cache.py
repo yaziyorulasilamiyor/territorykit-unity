@@ -68,7 +68,18 @@ class BatchCache:
         # pytest tmp_path) is enough to clear Windows' 260-character MAX_PATH.
         tmp = path.parent / f".tmp-{uuid4().hex}"
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            # Windows can raise a sharing violation when two writers race to replace the same
+            # destination at once — POSIX rename has no such restriction, but MoveFileEx does.
+            # Cache entries are content-addressed, so a concurrent writer landing first means the
+            # destination already holds the same bytes this call was about to write; discard our
+            # own temp file rather than treating that as a real failure. If the destination truly
+            # isn't there, this was a different problem and the error is real.
+            tmp.unlink(missing_ok=True)
+            if not path.exists():
+                raise
         self._evict_if_needed()
 
     def _evict_if_needed(self) -> None:
