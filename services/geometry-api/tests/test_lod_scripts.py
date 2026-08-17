@@ -296,10 +296,6 @@ def _level(
         lod, parts, events, holes=holes, source_holes=source_holes, dropped_area=dropped_area
     )
     all_events = events + _UPSTREAM_EVENTS
-    unsafe = any(
-        item["kind"] in ("part_merge", "part_created", "dropped_hole", "dropped_part")
-        for item in events
-    )
     return {
         "territoryCount": 81,
         "vertices": vertices,
@@ -308,8 +304,21 @@ def _level(
         "simplification": simplification,
         "loss": _ledger(all_events),
         "lossy": any(kind_of(item["kind"]).category == "loss" for item in all_events),
-        "topologyChanged": unsafe or any(item["kind"] == "part_split" for item in events),
-        "pickingUnsafe": unsafe,
+        **_flags(all_events),
+    }
+
+
+def _flags(all_events: list[dict[str, Any]]) -> dict[str, bool]:
+    """The two client flags, over every stage's events — what the build now writes.
+
+    Not the simplification slice. That is what the fifth round's blocker was: the flags answered
+    "did the simplifier change the topology" while claiming to answer "can this mesh answer a
+    click". Because the chain's normalization drops seven islets, every level of a healthy report
+    is now picking-unsafe — including ``high``, whose simplification is spotless.
+    """
+    return {
+        "topologyChanged": any(kind_of(item["kind"]).changes_topology for item in all_events),
+        "pickingUnsafe": any(kind_of(item["kind"]).picking_unsafe for item in all_events),
     }
 
 
@@ -367,9 +376,49 @@ def _healthy_report() -> dict[str, Any]:
     }
 
 
+def _report_with_a_lossless_normalization() -> dict[str, Any]:
+    """The same report with the seven dropped islets taken out of the chain.
+
+    The real geoBoundaries import drops them, which makes every level lossy and therefore
+    picking-unsafe. That is honest, but it also means the healthy report cannot isolate a case
+    about one stage: ``high`` is already unsafe before the mutation lands. This is the same
+    ladder with a clean upstream, where ``high`` is safe and a single injected event is the only
+    thing that can change that.
+    """
+    report = _healthy_report()
+    report["normalization"]["loss"]["events"] = []
+    report["normalization"]["loss"]["lossy"] = False
+    for lod in LOD_LEVELS:
+        loss = report["levels"][lod]["loss"]
+        loss["events"] = [item for item in loss["events"] if item["stage"] != "upstream"]
+        report["levels"][lod]["lossy"] = loss["lossy"] = any(
+            kind_of(item["kind"]).category == "loss" for item in loss["events"]
+        )
+        report["levels"][lod].update(_flags(loss["events"]))
+    return report
+
+
 def test_the_healthy_report_passes() -> None:
     """Without this, every mutation below could be passing for the wrong reason."""
     assert check(_healthy_report()) == []
+
+
+def test_the_healthy_chain_calls_every_level_picking_unsafe() -> None:
+    """Not a detail of the fixture — the conclusion the fifth round's fix forces.
+
+    The import drops seven real islets (2,0–6,1 m²), so every level is ``lossy: true``, so no
+    level can claim a click is reliable. ``high``'s *simplification* is still spotless, and that
+    is what its ``simplification.topologyChanged`` reports; the top-level flag answers about the
+    mesh, and the mesh is missing seven islets.
+    """
+    levels = _healthy_report()["levels"]
+    assert [levels[lod]["pickingUnsafe"] for lod in LOD_LEVELS] == [True, True, True]
+    assert check(_healthy_report()) == []
+
+    without_upstream = _report_with_a_lossless_normalization()["levels"]
+    assert without_upstream["high"]["pickingUnsafe"] is False, (
+        "and with nothing dropped upstream, high is safe again — the flag tracks the chain"
+    )
 
 
 # ---- the mutation that gave this round its blocker ----------------------------------------
@@ -444,12 +493,7 @@ def _refresh(report: dict[str, Any], lod: str) -> None:
     all_events = level["loss"]["events"]
     level["lossy"] = any(kind_of(item["kind"]).category == "loss" for item in all_events)
     level["loss"]["lossy"] = level["lossy"]
-    unsafe = any(
-        item["kind"] in ("part_merge", "part_created", "dropped_hole", "dropped_part")
-        for item in events
-    )
-    level["pickingUnsafe"] = unsafe
-    level["topologyChanged"] = unsafe or any(item["kind"] == "part_split" for item in events)
+    level.update(_flags(all_events))
 
 
 # ---- the naming convention this round removed --------------------------------------------
@@ -571,19 +615,10 @@ def test_a_lossy_flag_that_contradicts_its_own_events_is_caught() -> None:
 
     # For the other direction the level has to have no loss events at all, which means an
     # upstream step that dropped nothing — the stage is still asked, it just has nothing to say.
-    overstated = _healthy_report()
-    overstated["normalization"]["loss"]["events"] = []
-    overstated["normalization"]["loss"]["lossy"] = False
-    for lod in LOD_LEVELS:
-        loss = overstated["levels"][lod]["loss"]
-        loss["events"] = [item for item in loss["events"] if item["stage"] != "upstream"]
-        overstated["levels"][lod]["lossy"] = loss["lossy"] = any(
-            kind_of(item["kind"]).category == "loss" for item in loss["events"]
-        )
+    overstated = _report_with_a_lossless_normalization()
     assert check(overstated) == [], "a lossless upstream is a legitimate report"
 
     overstated["levels"]["high"]["loss"]["lossy"] = True
-    overstated["levels"]["high"]["lossy"] = True
     assert any("the events are what happened" in f for f in check(overstated))
 
 
@@ -688,6 +723,67 @@ def test_a_level_with_no_client_flags_is_caught() -> None:
     failures = check(report)
 
     assert any("nothing to gate picking on" in failure for failure in failures), failures
+
+
+# ---- the mutation that gave the fifth round its blocker -----------------------------------
+
+
+def test_high_with_a_triangulation_loss_cannot_report_picking_as_safe() -> None:
+    """B1: the manifest that passed this checker while contradicting itself.
+
+    ``high``'s simplification is clean, so every check that read the simplification slice —
+    including the flag check — saw an empty event list and agreed with ``pickingUnsafe: false``.
+    One stage later, triangulation skipped a part: ``lossy: true`` in the same manifest. Phase 4/5
+    read ``pickingUnsafe`` and would have picked against a mesh missing a province's part.
+    """
+    report = _report_with_a_lossless_normalization()
+    high = report["levels"]["high"]
+    assert check(report) == [] and high["pickingUnsafe"] is False, (
+        "the case is only about triangulation, so nothing else may be making high unsafe"
+    )
+
+    # The manifest the round was found with: the loss is recorded, the flag is not updated.
+    high["loss"]["events"].append(_event("skipped_part", 1, stage="triangulation"))
+    high["loss"]["lossy"] = high["lossy"] = True
+
+    failures = check(report)
+
+    assert any("pickingUnsafe is False but the events say True" in f for f in failures), failures
+    assert any("skipped_part" in f for f in failures), (
+        "the failure has to name what made the level unsafe, not just that it is"
+    )
+
+    # And with the flags told the truth, the same report is a legitimate one: a level may lose a
+    # part in triangulation, it may not claim clicks are still reliable afterwards.
+    high.update(_flags(high["loss"]["events"]))
+    assert check(report) == []
+
+
+@pytest.mark.parametrize("lod", ["high", "medium", "low"])
+def test_a_level_that_is_lossy_and_safe_at_once_is_caught(lod: str) -> None:
+    """The invariant on its own, checked between the two booleans rather than against events.
+
+    ``_check_client_flags`` compares each flag with the events; this compares the flags with each
+    other. A report whose events and flags were written by one wrong producer that agreed with
+    itself still cannot get past both.
+    """
+    report = _healthy_report()
+    report["levels"][lod]["pickingUnsafe"] = False
+
+    failures = check(report)
+
+    assert report["levels"][lod]["lossy"] is True, "the healthy chain drops seven islets upstream"
+    assert any("lossy is true but pickingUnsafe is false" in f for f in failures), failures
+
+
+def test_a_client_flag_that_is_a_string_is_not_read_as_a_boolean() -> None:
+    """``bool("false")`` is ``True``; a renderer testing truthiness would get the opposite."""
+    report = _healthy_report()
+    report["levels"]["low"]["pickingUnsafe"] = "true"
+
+    failures = check(report)
+
+    assert any("not a boolean" in failure for failure in failures), failures
 
 
 def test_high_recording_any_simplification_loss_is_caught() -> None:

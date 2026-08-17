@@ -19,6 +19,8 @@ from geometry_api.loss import (
     CATEGORY_CHANGE,
     CATEGORY_LOSS,
     EVENT_KINDS,
+    LOSS_KINDS,
+    PICKING_UNSAFE_KINDS,
     SCHEMA_VERSION,
     SIDE_ADDED,
     SIDE_NEUTRAL,
@@ -119,6 +121,52 @@ def test_every_kind_declares_a_known_category_and_side() -> None:
         assert kind.what.strip(), f"{name} has no description for whoever reads the manifest"
 
 
+def test_every_loss_is_picking_unsafe() -> None:
+    """The fifth review round's invariant, guarded on the schema rather than on a build.
+
+    ``pickingUnsafe: false`` is a claim that this mesh is topologically the source, so it cannot
+    coexist with ``lossy: true`` — something the source had is not there to click on. Deriving
+    both from the same per-kind declarations makes that unreachable instead of merely unobserved,
+    and this is what would notice if a kind were ever added as a loss that is somehow safe.
+    """
+    assert set(LOSS_KINDS) <= set(PICKING_UNSAFE_KINDS)
+    for name in LOSS_KINDS:
+        assert kind_of(name).picking_unsafe, name
+
+
+def test_moving_a_boundary_is_not_a_topology_change() -> None:
+    """Otherwise the flags would be true at every level and would tell a renderer nothing.
+
+    Simplification moves boundaries by definition — ``high`` records 4,86 km² of retreat over 81
+    provinces. If that set ``pickingUnsafe``, no level would ever be safe and the flag would stop
+    distinguishing "the shape shifted by less than the tolerance" from "a strait is drawn as
+    land". How far a boundary moved is reported as a ratio, not as a boolean.
+    """
+    for name in ("boundary_retreat", "boundary_advance", "severe_shrink"):
+        assert kind_of(name).changes_topology is False, name
+        assert kind_of(name).picking_unsafe is False, name
+
+    # The repair is the one structural event that moves the output back towards the source: an
+    # enclave simplification invented, filled in again. The result covers the ground the source
+    # covers, so it is safe — the only ``change`` kind touching rings that is.
+    assert kind_of("artifact_hole_removed").picking_unsafe is False
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["part_merge", "part_split", "part_created", "hole_merge", "hole_split", "skipped_part"],
+)
+def test_every_structural_change_reaches_both_flags(kind: str) -> None:
+    """Including the four the old hand-written derivation missed.
+
+    ``build._client_flags`` used to test ``merges or created or dropped_hole or dropped_parts``
+    against ``SimplifyResult``. ``part_split``, ``hole_merge`` and ``hole_split`` were not in that
+    list, and ``skipped_part`` belongs to a stage it never looked at.
+    """
+    assert kind_of(kind).changes_topology is True
+    assert kind_of(kind).picking_unsafe is True
+
+
 def test_the_kinds_a_client_must_never_see_silently_are_all_losses() -> None:
     """A guard on the schema, not on the code: these five mean geometry is missing.
 
@@ -168,6 +216,46 @@ def test_the_flag_is_the_loss_events_and_nothing_else() -> None:
         [event(STAGE_SIMPLIFICATION, "dropped_part", count=1, area=684.6, details=["Artvin"])]
     )
     assert with_loss.is_lossy is True
+
+
+def test_picking_safety_is_answered_over_every_stage_not_just_simplification() -> None:
+    """B1 of the fifth round, at the level where the flag is derived.
+
+    A ``high`` build whose simplification was clean and whose *triangulation* dropped a part is
+    lossy, and the mesh a click lands on is missing that part. The old derivation asked
+    ``SimplifyResult`` and therefore answered "safe".
+    """
+    clean = LossLedger.of([event(STAGE_SIMPLIFICATION, "boundary_retreat", 81, 4_860_000.0)])
+    assert clean.picking_unsafe is False
+    assert clean.topology_changed is False
+
+    triangulation_loss = clean + LossLedger.of(
+        [event(STAGE_TRIANGULATION, "skipped_part", count=1)]
+    )
+    assert triangulation_loss.is_lossy is True
+    assert triangulation_loss.picking_unsafe is True, (
+        "a part that reached triangulation and produced no triangles is not in the mesh"
+    )
+
+    upstream_loss = clean + LossLedger.of(
+        [event(STAGE_UPSTREAM, "dropped_islet", count=7, details=[f"i{n}" for n in range(7)])]
+    )
+    assert upstream_loss.picking_unsafe is True, (
+        "geometry the normalization removed never reaches the mesh either"
+    )
+
+    hole_rearrangement = clean + LossLedger.of([event(STAGE_SIMPLIFICATION, "hole_merge", count=2)])
+    assert hole_rearrangement.is_lossy is False, "no ground is lost when two enclaves become one"
+    assert hole_rearrangement.picking_unsafe is True, (
+        "the enclave structure a click resolves against is not the source's any more"
+    )
+
+
+def test_a_degenerate_triangle_is_unsafe_without_being_a_topology_change() -> None:
+    """The one kind where the two flags differ, so neither is a rename of the other."""
+    ledger = LossLedger.of([event(STAGE_TRIANGULATION, "degenerate_triangle", count=62)])
+    assert ledger.topology_changed is False, "the part and enclave counts are untouched"
+    assert ledger.picking_unsafe is True, "it is still a loss, and losses cannot claim safety"
 
 
 def test_a_lossy_boolean_in_the_serialised_block_is_never_read_back() -> None:

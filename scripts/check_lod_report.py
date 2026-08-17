@@ -246,15 +246,24 @@ def _check_client_flags(lod: str, level: dict[str, Any], events: list[LossEvent]
 
     Phase 4/5 read these to decide whether a level can answer a click. A level that merged two
     islands and reports ``pickingUnsafe: false`` would hand Unity a land bridge and no warning.
+
+    ``events`` is **every** stage's, not simplification's. The fifth review round found this
+    function reading the simplification slice: a ``high`` level whose triangulation dropped a part
+    was checked against an empty event list and passed with ``pickingUnsafe: false`` beside
+    ``lossy: true``. The same blind spot covered ``hole_merge``/``hole_split`` and everything the
+    geoBoundaries normalization removed upstream.
+
+    The list of unsafe kinds is not written out here: it is ``kind_of(...).picking_unsafe`` from
+    the shared schema, for the reason at the top of this file. What stays independent is the
+    derivation — this recomputes the flags from the report's own events and compares.
     """
     failures: list[str] = []
-    unsafe = bool(
-        _count(events, "part_merge")
-        or _count(events, "part_created")
-        or _count(events, "dropped_hole")
-        or _count(events, "dropped_part")
-    )
-    changed = unsafe or bool(_count(events, "part_split"))
+    # Any recorded event of an unsafe kind counts, without also asking that its count be nonzero:
+    # a ``dropped_part`` written with ``count: 0`` is a malformed record, and reading it as
+    # "nothing happened" is the fail-open move this whole schema exists to prevent. Events with
+    # nothing in them at all never reach a ledger — ``LossLedger.of`` drops those.
+    changed = any(kind_of(item.kind).changes_topology for item in events)
+    unsafe = any(kind_of(item.kind).picking_unsafe for item in events)
 
     for key, derived in (("topologyChanged", changed), ("pickingUnsafe", unsafe)):
         stated = level.get(key)
@@ -262,9 +271,48 @@ def _check_client_flags(lod: str, level: dict[str, Any], events: list[LossEvent]
             failures.append(
                 f"{lod}: no '{key}' flag; phases 4 and 5 have nothing to gate picking on"
             )
-        elif bool(stated) != derived:
-            failures.append(f"{lod}: {key} is {stated} but the events say {derived}")
+        elif not isinstance(stated, bool):
+            failures.append(
+                f"{lod}: {key} is {stated!r}, not a boolean; a client reading this with a "
+                f"truthiness test would get an answer nobody wrote"
+            )
+        elif stated != derived:
+            culprits = sorted(
+                {
+                    item.kind
+                    for item in events
+                    if (
+                        kind_of(item.kind).changes_topology
+                        if key == "topologyChanged"
+                        else kind_of(item.kind).picking_unsafe
+                    )
+                }
+            )
+            failures.append(
+                f"{lod}: {key} is {stated} but the events say {derived}"
+                + (f" ({', '.join(culprits)})" if culprits else "")
+            )
     return failures
+
+
+def _check_lossy_implies_unsafe(lod: str, level: dict[str, Any]) -> list[str]:
+    """A level cannot report that geometry went missing and that clicks are still reliable.
+
+    Stated as its own check, against the two serialised booleans, rather than left to follow from
+    the recomputation above. That check compares each flag with the events; this one compares the
+    flags with *each other*, so it holds even for a report whose events and flags were both
+    written by something that agreed with itself and was wrong. It is the shape of the fifth
+    round's blocker: ``lossy: true`` and ``pickingUnsafe: false`` in the same manifest, which
+    Phase 4/5 would resolve by believing the flag they were told to gate on.
+    """
+    lossy, unsafe = level.get("lossy"), level.get("pickingUnsafe")
+    if lossy is True and unsafe is False:
+        return [
+            f"{lod}: lossy is true but pickingUnsafe is false. Something the source had is not in "
+            f"this level's mesh, so a click there cannot be trusted; pickingUnsafe: false claims "
+            f"the geometry is topologically the source"
+        ]
+    return []
 
 
 def check(report: dict[str, Any]) -> list[str]:
@@ -361,7 +409,10 @@ def _check_level_loss(levels: dict[str, Any]) -> list[str]:
         simplify_events = [item for item in events if item.stage == STAGE_SIMPLIFICATION]
         failures.extend(_check_area_budget(lod, simplification, simplify_events))
         failures.extend(_check_counting_identities(lod, simplification, simplify_events))
-        failures.extend(_check_client_flags(lod, levels[lod], simplify_events))
+        # Every stage's events, unlike the two checks above: the budget and the counting
+        # identities are simplification's books, but a click lands on the final mesh.
+        failures.extend(_check_client_flags(lod, levels[lod], events))
+        failures.extend(_check_lossy_implies_unsafe(lod, levels[lod]))
 
         if lod == "high":
             lost = [item for item in simplify_events if item.is_loss]

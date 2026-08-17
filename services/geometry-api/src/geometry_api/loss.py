@@ -36,6 +36,25 @@ that to check an identity per level — source area, plus everything recorded as
 everything recorded as removed, has to equal the output area. A code path that changes geometry
 without writing an event breaks the identity and fails the build, which is what makes this
 accounting closed rather than a list of the loss paths somebody remembered.
+
+**Topology and picking.** Every kind also says whether it changes the *structure* of the shape —
+how many parts, how many enclaves — as opposed to only moving a boundary within tolerance. That
+is what ``LossLedger.topology_changed`` and ``LossLedger.picking_unsafe`` are derived from, and
+they are derived from the events of **every stage**, because the mesh Unity clicks on is the end
+of the whole chain. The fifth review round found the flag being read off the simplification stage
+alone: a ``high`` level that lost a part in *triangulation* was ``lossy: true`` and
+``pickingUnsafe: false`` at the same time, and Phase 4/5 would have read the second and trusted
+it. Two consequences are load-bearing here:
+
+* ``picking_unsafe`` is implied by ``is_lossy``. Every loss kind is picking-unsafe by
+  construction, so a ledger cannot say "something went missing" and "clicks are reliable" at
+  once. ``scripts/check_lod_report.py`` asserts the implication separately, on the serialised
+  manifest, so a build that derives it some other way is caught rather than believed.
+* Moving a boundary is not changing topology. ``boundary_retreat``, ``boundary_advance`` and
+  ``severe_shrink`` set neither flag: every level including ``high`` moves boundaries — that is
+  what simplification *is* — and a flag that is true everywhere tells a renderer nothing.
+  ``retainedAreaRatio`` and ``minPartRetainedAreaRatio`` are the numbers for how far a boundary
+  moved; these two booleans answer the narrower question of whether the structure still matches.
 """
 
 from __future__ import annotations
@@ -107,6 +126,13 @@ class EventKind:
     category: str
     side: str
     needs_detail: bool
+    changes_topology: bool
+    """True when this event changes how many parts or enclaves the shape has.
+
+    Declared per kind rather than inferred, for the same reason the category is: a new kind whose
+    author did not think about picking would otherwise default to "harmless". There is no
+    default — omitting it is a ``TypeError`` at import time.
+    """
     what: str
     """One sentence, written for whoever reads the manifest rather than for whoever wrote it."""
 
@@ -115,6 +141,17 @@ class EventKind:
             raise LossSchemaError(f"kind {self.name!r} has unknown category {self.category!r}")
         if self.side not in SIDES:
             raise LossSchemaError(f"kind {self.name!r} has unknown side {self.side!r}")
+
+    @property
+    def picking_unsafe(self) -> bool:
+        """True when a click on the final mesh can answer differently from the source.
+
+        A loss means the click misses ground the source has (or hits ground the source calls
+        water, for a vanished enclave); a topology change means the component structure the click
+        resolves against is not the source's. Either way the answer can be wrong rather than
+        merely imprecise, so both set it.
+        """
+        return self.category == CATEGORY_LOSS or self.changes_topology
 
 
 def _schema(*kinds: EventKind) -> Mapping[str, EventKind]:
@@ -128,6 +165,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_REMOVED,
         needs_detail=True,
+        changes_topology=True,
         what="a source polygon part with no surviving counterpart in the output",
     ),
     EventKind(
@@ -135,6 +173,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_ADDED,
         needs_detail=True,
+        changes_topology=True,
         what="a source interior ring (an enclave) that is gone; the region now covers it, which "
         "is why its area is on the added side even though it is a loss",
     ),
@@ -143,6 +182,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_REMOVED,
         needs_detail=True,
+        changes_topology=True,
         what="a source part removed before this build, under the importer's ring area floor",
     ),
     EventKind(
@@ -150,6 +190,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_ADDED,
         needs_detail=True,
+        changes_topology=True,
         what="a source interior ring removed before this build, under the importer's area floor",
     ),
     EventKind(
@@ -157,6 +198,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_REMOVED,
         needs_detail=False,
+        changes_topology=True,
         what="a part that reached triangulation and produced no triangles",
     ),
     EventKind(
@@ -164,6 +206,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_ADDED,
         needs_detail=False,
+        changes_topology=True,
         what="an interior ring triangulation could not use; the mesh covers it",
     ),
     EventKind(
@@ -171,6 +214,10 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_LOSS,
         SIDE_NEUTRAL,
         needs_detail=False,
+        # Not a topology change — the part and enclave counts are untouched — but a loss, so it
+        # still makes picking unsafe: the triangle collapsed on the float32 grid rather than
+        # having been zero-area in the source, and the ray now passes through where it was.
+        changes_topology=False,
         what="a zero-area triangle dropped from a mesh",
     ),
     # ---- changes: the shape or the component structure differs, nothing is missing ---------
@@ -179,6 +226,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_ADDED,
         needs_detail=False,
+        changes_topology=True,
         what="two or more source parts became one output part; the ground between them is now "
         "drawn as land, and the area is an upper bound on that false land bridge",
     ),
@@ -187,6 +235,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_REMOVED,
         needs_detail=False,
+        changes_topology=True,
         what="one source part became several output parts",
     ),
     EventKind(
@@ -194,6 +243,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_ADDED,
         needs_detail=True,
+        changes_topology=True,
         what="an output part no source part corresponds to",
     ),
     EventKind(
@@ -201,6 +251,11 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_NEUTRAL,
         needs_detail=False,
+        # The only kind that moves the output *back* to the source structure: simplification
+        # invented an enclave the source never had and this pipeline filled it in again. The
+        # region ends up covering the same ground it covers in the source, so the flags stay
+        # down. Every other structural kind leaves the output differing from the source.
+        changes_topology=False,
         what="an interior ring simplification invented and this pipeline removed again",
     ),
     EventKind(
@@ -208,6 +263,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_NEUTRAL,
         needs_detail=False,
+        changes_topology=True,
         what="two or more source interior rings became one output interior ring",
     ),
     EventKind(
@@ -215,6 +271,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_NEUTRAL,
         needs_detail=False,
+        changes_topology=True,
         what="one source interior ring became several output interior rings",
     ),
     EventKind(
@@ -222,6 +279,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_REMOVED,
         needs_detail=False,
+        changes_topology=False,
         what="area a surviving part covered in the source and no longer covers",
     ),
     EventKind(
@@ -229,6 +287,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_ADDED,
         needs_detail=False,
+        changes_topology=False,
         what="area a surviving part covers that the source did not",
     ),
     EventKind(
@@ -236,6 +295,7 @@ EVENT_KINDS: Mapping[str, EventKind] = _schema(
         CATEGORY_CHANGE,
         SIDE_NEUTRAL,
         needs_detail=True,
+        changes_topology=False,
         what="a part that survived but kept only a small fraction of its area; its square metres "
         "are already counted under boundary_retreat, this names the parts worth looking at",
     ),
@@ -252,6 +312,24 @@ LOSS_KINDS: tuple[str, ...] = tuple(
 CHANGE_KINDS: tuple[str, ...] = tuple(
     name for name, kind in EVENT_KINDS.items() if kind.category == CATEGORY_CHANGE
 )
+TOPOLOGY_KINDS: tuple[str, ...] = tuple(
+    name for name, kind in EVENT_KINDS.items() if kind.changes_topology
+)
+PICKING_UNSAFE_KINDS: tuple[str, ...] = tuple(
+    name for name, kind in EVENT_KINDS.items() if kind.picking_unsafe
+)
+"""Every kind that makes a click on the final mesh untrustworthy — losses plus topology changes.
+
+A superset of ``LOSS_KINDS`` by construction, which is the invariant Phase 4/5 depend on: a level
+can never report ``lossy: true`` alongside ``pickingUnsafe: false``.
+"""
+
+if not set(LOSS_KINDS) <= set(PICKING_UNSAFE_KINDS):  # pragma: no cover - import-time guard
+    raise LossSchemaError(
+        f"loss kind(s) {', '.join(sorted(set(LOSS_KINDS) - set(PICKING_UNSAFE_KINDS)))} are not "
+        f"picking-unsafe; a level cannot report that geometry went missing and that clicks are "
+        f"still reliable"
+    )
 
 
 def kind_of(name: str) -> EventKind:
@@ -308,6 +386,14 @@ class LossEvent:
     @property
     def is_loss(self) -> bool:
         return self.spec.category == CATEGORY_LOSS
+
+    @property
+    def changes_topology(self) -> bool:
+        return self.spec.changes_topology
+
+    @property
+    def picking_unsafe(self) -> bool:
+        return self.spec.picking_unsafe
 
     @property
     def removed_area(self) -> float:
@@ -411,6 +497,31 @@ class LossLedger:
         Not ``bool(self.events)``: a merge is an event and not a loss. See the module docstring.
         """
         return bool(self.losses)
+
+    @property
+    def topology_changed(self) -> bool:
+        """True when the part or enclave structure of the output differs from the source.
+
+        Over every stage in this ledger, not just simplification. A part that survived
+        simplification and then produced no triangles is as absent from the mesh as one the
+        simplifier dropped.
+        """
+        return any(item.changes_topology for item in self.events)
+
+    @property
+    def picking_unsafe(self) -> bool:
+        """True when a click on the mesh this ledger describes can return the wrong answer.
+
+        The claim ``False`` makes is narrow and strong: nothing in the chain that produced this
+        mesh — normalization, simplification, triangulation — removed geometry or changed how many
+        parts and enclaves there are, so the mesh is topologically the source and a click resolves
+        to the region the source says owns that point. Boundaries have still moved by up to the
+        level's tolerance; ``retainedAreaRatio`` is where that is quantified.
+
+        Implied by ``is_lossy`` (see ``PICKING_UNSAFE_KINDS``). Phase 4/5 read the serialised
+        form of this, and ``scripts/check_lod_report.py`` re-derives it independently.
+        """
+        return any(item.picking_unsafe for item in self.events)
 
     @property
     def removed_area(self) -> float:

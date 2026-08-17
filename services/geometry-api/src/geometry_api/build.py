@@ -275,10 +275,10 @@ def build_manifest(
         # event naming what went missing.
         "lossy": ledger.is_lossy,
         "loss": ledger.as_manifest_dict(),
-        # What phases 4 and 5 read before they trust a level for picking. "Nothing was lost" and
-        # "the shape is the same" are different claims: a level can lose nothing and still draw a
-        # strait as land, and a click there selects a province the source says is water.
-        **_client_flags(simplification),
+        # What phases 4 and 5 read before they trust a level for picking. Derived from the same
+        # ledger as "lossy" above — every stage, not just simplification — because the mesh a
+        # click hits is the end of the whole chain.
+        **_client_flags(ledger),
         # Kept at the top level as well: phase 1's manifest readers and the CI report checker
         # already address it here, and moving it would break them for no gain.
         "simplification": simplification.as_manifest_dict() if simplification else None,
@@ -287,7 +287,7 @@ def build_manifest(
     }
 
 
-def _client_flags(simplification: SimplifyResult | None) -> dict[str, Any]:
+def _client_flags(ledger: LossLedger) -> dict[str, Any]:
     """The two booleans a renderer needs, stated rather than left to be inferred.
 
     Phase 2 measured the topology changes and wrote them into the manifest, but nothing on the
@@ -295,21 +295,23 @@ def _client_flags(simplification: SimplifyResult | None) -> dict[str, Any]:
     asking a client to decide "is 30 merges a problem?" is asking it to re-derive a policy.
     These two say it outright, for phases 4 and 5 to gate on.
 
-    ``pickingUnsafe`` is the sharper one. A merge draws a strait as land and a dropped enclave
-    draws a lake as land, so a ray that used to miss the province now hits it — the click is
-    wrong, not merely imprecise. A dropped part is the mirror image: the click misses a place
-    the source says exists. All three set it.
+    ``pickingUnsafe`` is the sharper one, and it is about the **final** mesh. The fifth review
+    round found it derived from ``SimplifyResult`` alone, which made it answer a question nobody
+    asks: "did the simplifier change the topology", not "can this mesh answer a click". The gap
+    was demonstrable — a ``high`` level whose triangulation recorded ``skipped_part: 1`` was
+    written as ``lossy: true`` with ``pickingUnsafe: false``, and CI passed it. Holes merging or
+    splitting, and anything the geoBoundaries normalization removed before the build, were
+    invisible to it for the same reason.
+
+    So it is derived from the ledger, which spans normalization, simplification and
+    triangulation, through the per-kind declarations in ``loss.py``. ``False`` now means what a
+    reader would assume it means: nothing between the source polygons and this mesh removed
+    geometry or changed the part/enclave structure. ``lossy: true`` with ``pickingUnsafe: false``
+    is unreachable rather than merely unobserved — see ``PICKING_UNSAFE_KINDS``.
     """
-    if simplification is None:
-        return {"topologyChanged": False, "pickingUnsafe": False}
     return {
-        "topologyChanged": simplification.topology_changed,
-        "pickingUnsafe": bool(
-            simplification.merges
-            or simplification.created_parts
-            or simplification.dropped_hole_count
-            or simplification.dropped_parts
-        ),
+        "topologyChanged": ledger.topology_changed,
+        "pickingUnsafe": ledger.picking_unsafe,
     }
 
 

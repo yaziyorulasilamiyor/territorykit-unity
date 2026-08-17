@@ -358,18 +358,18 @@ class SimplifyResult:
 
     @property
     def topology_changed(self) -> bool:
-        """True when the component structure differs from the source in any way.
+        """True when *this stage* changed the component or enclave structure of the source.
 
-        Phase 4/5 read this through the manifest: a level where this is true cannot be used for
-        picking without the caller knowing that a click may land on ground the source called sea.
+        Read off the ledger through ``loss.py``'s per-kind declaration rather than from a list of
+        counters here. The counters missed ``hole_merge`` and ``hole_split`` — two source enclaves
+        becoming one leaves ``dropped_hole`` at zero — so a level could rearrange enclaves and
+        report an unchanged topology.
+
+        Stage-scoped on purpose: this is what the ``simplification`` block reports. The manifest's
+        top-level flag spans triangulation and normalization too, because those can remove a part
+        this stage kept; see ``build._client_flags``.
         """
-        return bool(
-            self.merges
-            or self.splits
-            or self.created_parts
-            or self.dropped_hole_count
-            or self.dropped_parts
-        )
+        return self.ledger.topology_changed
 
     @property
     def retained_area_ratio(self) -> float:

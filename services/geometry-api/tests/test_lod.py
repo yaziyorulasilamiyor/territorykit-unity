@@ -1050,6 +1050,43 @@ def test_the_manifest_states_the_two_flags_a_renderer_needs(sample_dataset: Data
     )
 
 
+def test_a_triangulation_loss_at_high_makes_the_level_unsafe_to_click(
+    sample_dataset: Dataset,
+) -> None:
+    """B1 of the fifth review round, on the flag a renderer actually reads.
+
+    The counterexample it was found with: simplification at ``high`` is clean, and a part is lost
+    one stage later, in triangulation. The manifest said ``lossy: true`` and
+    ``pickingUnsafe: false`` in the same breath, because the flag was derived from
+    ``SimplifyResult`` and triangulation is not in it. Phase 4/5 were told to gate picking on the
+    second of those two.
+    """
+    from dataclasses import replace
+
+    from geometry_api.build import build_meshes
+    from geometry_api.triangulate import GeometryLoss
+
+    high = simplify_dataset(sample_dataset, LOD_HIGH)
+    entries = build_meshes(high.dataset, lod=LOD_HIGH)
+    assert build_manifest(sample_dataset, entries, LOD_HIGH, high)["pickingUnsafe"] is False
+
+    # The synthetic loss: one part reached triangulation and produced no triangles. Injected
+    # rather than provoked so the test states the case it is about instead of depending on a
+    # province that happens to be small enough this year.
+    damaged = [replace(entries[0], loss=GeometryLoss(skipped_parts=1)), *entries[1:]]
+    manifest = build_manifest(sample_dataset, damaged, LOD_HIGH, high)
+
+    assert manifest["lossy"] is True
+    assert manifest["pickingUnsafe"] is True, (
+        "the part is missing from the mesh a click lands on, whichever stage lost it"
+    )
+    assert manifest["topologyChanged"] is True
+    assert manifest["simplification"]["topologyChanged"] is False, (
+        "the simplification block still reports its own stage; the top-level flags are the ones "
+        "that span the chain"
+    )
+
+
 @pytest.mark.parametrize("lod", LOD_LEVELS)
 def test_the_same_input_produces_the_same_bytes(sample_dataset: Dataset, lod: str) -> None:
     """Phase 3's content-addressed cache assumes a level rebuilds byte for byte."""
