@@ -492,18 +492,18 @@ TerritoryKit CLI çalışmazsa (Node sürümü, submodule pin uyumsuzluğu, buil
 - [x] `POST /v1/datasets/{id}/revisions/{revisionId}/mesh/batch` — çoklu mesh tek istekte (TKMB konteyner formatı, `docs/mesh-format.md`'de)
 
 **Yapılacaklar**
-- [ ] Disk tabanlı, içerik-adresli cache (aynı girdi → aynı çıktı, bir kez hesapla)
-- [ ] `ETag` + `Cache-Control` başlıkları, `304 Not Modified` desteği
-- [ ] Binary yanıtlarda gzip
-- [ ] Hatalar için tutarlı JSON şeması (`{"error": {"code": ..., "message": ...}}`)
-- [ ] OpenAPI dokümanı anlamlı (açıklamalar, örnekler)
+- [x] Disk tabanlı, içerik-adresli cache (aynı girdi → aynı çıktı, bir kez hesapla)
+- [x] `ETag` + `Cache-Control` başlıkları, `304 Not Modified` desteği
+- [x] Binary yanıtlarda gzip (önceden üretilmiş varyant, madde 9)
+- [x] Hatalar için tutarlı JSON şeması (`{"error": {"code": ..., "message": ...}}`)
+- [x] OpenAPI dokümanı anlamlı (her uç noktada açıklama)
 
 **Testler**
-- [ ] Her endpoint için mutlu yol + hata yolu testi
-- [ ] Cache hit/miss testi
-- [ ] ETag / 304 testi
-- [ ] Viewport doğruluğu: bbox dışındaki bölge dönmüyor, kesişen dönüyor
-- [ ] Basit yük ölçümü: cache hit p95 gecikmesi raporda sayı olarak yazılı
+- [x] Her endpoint için mutlu yol + hata yolu testi
+- [x] Cache hit/miss testi
+- [x] ETag / 304 testi
+- [x] Viewport doğruluğu: bbox dışındaki bölge dönmüyor, kesişen dönüyor
+- [x] Basit yük ölçümü: cache hit p95 gecikmesi raporda sayı olarak yazılı
 
 **Bitti sayılır**
 - `uvicorn geometry_api.main:app` ile yerel çalıştırma → Swagger'da
