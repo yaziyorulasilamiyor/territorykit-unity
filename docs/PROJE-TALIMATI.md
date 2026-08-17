@@ -435,13 +435,19 @@ TKMS mesh dosyaları × 3 seviye
 > çiziliyor. Uzaktan bakışta görünmez ama tıklama o noktada ili seçer — Unity'de olmayan bir
 > kara köprüsü. `low`'da 30 birleşmenin eklediği alan **269,8 km²** ölçüldü.
 >
-> **Seçim için kanıtlanmış tek güvenli seviye `high`.** (Düzeltme, 4. inceleme turu: bu satır
+> **Sadeleştirmesi hiçbir şeyi değiştirmeyen tek seviye `high`.** (Düzeltme, 4. tur: bu satır
 > önce "`high`/`medium` kullanılmalı" diyordu, bu **yanlıştı**.) Ölçüm: `medium`'da da 3 birleşme,
 > 3 bölünme ve gerçekten yok olan 1 parça (Artvin, 685 m²) var; eklenen alan 15,9 km². `high`'da
-> birleşme, bölünme, yok olan parça ve kaybolan delik **sıfır**. Bu, manifestte tahmine
-> bırakılmıyor: her seviye `topologyChanged` ve `pickingUnsafe` bayraklarını yazar
-> (`high`: ikisi de `false`; `medium` ve `low`: ikisi de `true`) ve CI bayrakları kayıtlardan
-> yeniden türetip uyuşmazsa düşer.
+> birleşme, bölünme, yok olan parça ve kaybolan delik **sıfır** — bunu manifestte
+> `simplification.topologyChanged: false` söylüyor.
+>
+> **Düzeltme, 5. inceleme turu:** üst düzeydeki `pickingUnsafe` **nihai mesh** hakkındadır ve
+> zincirin tamamından (normalizasyon + sadeleştirme + üçgenleme) türer; `lossy: true` iken
+> `false` olamaz. geoBoundaries normalizasyonu 7 gerçek adacığı attığı için gerçek TUR ADM1
+> zincirinde **üç seviye de** `topologyChanged` ve `pickingUnsafe` `true` yazar — yani
+> **seçim için güvenli seviye yok**; `high`'ın üstünlüğü yalnız kendi sadeleştirmesindedir.
+> Bayrakların tanımı `docs/mesh-format.md`'de; CI bayrakları kayıtlardan yeniden türetip
+> uyuşmazsa düşer.
 >
 > **Muhasebe zorunlu:** birleşme/bölünme **kayıp değildir** (alan kaybolmaz), o yüzden `lossy`
 > bayrağına girmez; kayıt şemasında `change` kategorisinde durur, `topologyChanges` bloğunda

@@ -1,19 +1,19 @@
 # Faz 2 — LOD üretimi
 
-Tarih: 2026-08-17 · Durum: Tamamlandı (bir mimari sapma + dört inceleme turu)
-Dal: feat/phase-2-lod-topology · Commit sayısı: 61
+Tarih: 2026-08-17 · Durum: Tamamlandı (bir mimari sapma + beş inceleme turu)
+Dal: feat/phase-2-lod-topology · Commit sayısı: 64
 
 ## Ne yapıldı
 TerritoryKit CLI build edildi, zincirde **kaldı** (`import geoboundaries`); `simplify.py` topojson ile **paylaşılan arc**
 üzerinden sadeleştiriyor (Karar 1); `build.py` `--lod` alıyor; `build_lod.py` zinciri tek komuta indiriyor,
-`check_lod_report.py` CI'da denetliyor, `repro_territorykit_finding.py` upstream bulgularını üretiyor. 4. tur kayıp
-muhasebesini **yapısal olarak** değiştirdi (Karar 3): tipli kayıt şeması + seviye başına bütçe denkliği.
+`check_lod_report.py` CI'da denetliyor. 4. tur muhasebeyi yapısal değiştirdi (Karar 3); 5. tur `pickingUnsafe`'i
+**zincirin tamamına** taşıdı.
 
 ## Nasıl doğrulandı
-`ruff` + `mypy` temiz, **231 test geçti**, kapsam **%95**, determinizm byte-identik. **Çatlak testi (üçgenleme + float32
+`ruff` + `mypy` temiz, **248 test geçti**, kapsam **%95**, determinizm byte-identik. **Çatlak testi (üçgenleme + float32
 SONRASI, üç seviyede): boşluk tam 0,0 · çakışma tam 0,0** — tolerans değil zorunluluk: paylaşılan arc üzerinde
 sadeleştirilen sınırın iki yanı aynı sayılar. Paylaşılan vertex bit-eşitliği ve kapsama (81×50 nokta, hepsi **tam 1**
-üçgende) üç seviyede geçti. Seçim güvenliği manifeste yazılı: `high` `pickingUnsafe:false`, medium/low `true`.
+üçgende) üç seviyede geçti.
 
 | Seviye | Vertex | high'ın %'si | Üçgen | Parça | Delik | Korunan alan | En kötü parça | Birleşmenin eklediği |
 |---|---|---|---|---|---|---|---|---|
@@ -23,52 +23,60 @@ sadeleştirilen sınırın iki yanı aynı sayılar. Paylaşılan vertex bit-eş
 | low | 30.753 | **%12,8** | 29.383 | 685 | 0 | %99,842 | %15,6 | 269,8 km² |
 
 ## Kararlar ve gerekçeleri
-1. **Sadeleştirme TerritoryKit yerine topojson** — strateji **önce denendi, sonra ölçüldü**: her ring'i bağımsız
-   Douglas-Peucker'dan geçiriyor. Kanıt, 81 geometrisi geçerli olduğu için onarımın suçlanamayacağı `high`: 197 komşu
-   çiftinin **32'sinde** çatlak (kaynakta sıfır, topojson'da sıfır).
-2. **Parça sayısı seviyeler arası sabit değil, bilinçli** — bedeli ölçüldü (yukarıdaki son kolon); alternatif olan
-   toleransı düşürmek %25 vertex bütçesini ihlal ediyor.
-3. **Muhasebe "bilinen yolları say"dan "denklik kur"a geçti** (4. tur) — üç turda her düzeltme yeni bulunan bir kayıp
-   yolunu saydı ve her turda listede olmayan bir yol çıktı; dördüncü kez tek tek yamamak reddedildi.
+1. **Sadeleştirme TerritoryKit yerine topojson** — önce denendi, sonra ölçüldü: her ring'i bağımsız Douglas-Peucker'dan
+   geçiriyor. Kanıt, onarımın suçlanamayacağı `high`: 197 komşu çiftinin **32'sinde** çatlak (topojson'da sıfır).
+2. **Parça sayısı seviyeler arası sabit değil, bilinçli** — bedeli tablodaki son kolon; alternatifi olan toleransı
+   düşürmek %25 vertex bütçesini ihlal ediyor.
+3. **Muhasebe "bilinen yolları say"dan "denklik kur"a geçti** (4. tur) — `lossy` alan **adının** önekine bakıyordu:
+   `removedRings` bayrağı kaldırıyor, aynı şeyi anlatan `collapsedParts` kaldırmıyordu. Yerine kapalı `EVENT_KINDS`,
+   bilinmeyen `kind`'de **fail-closed**, seviye başına alan + parça + delik denkliği (tutmazsa build düşer). CI şemayı
+   import ediyor ama bayrağı, bütçeyi ve denklikleri **kendisi** hesaplıyor.
 
-## 4. inceleme turu — yapı değişti
-Önceki üç turun düzeltmeleri git geçmişinde. Bu tur **kuralın kendisini** kırdı: `lossy`, alan adının `dropped`/`skipped`/
-`lost`/`removed`/`degenerate` ile başlamasına bakıyordu — `removedRings` bayrağı kaldırıyor, aynı şeyi anlatan
-`collapsedParts` ve `discarded_holes` kaldırmıyordu, CI üçünü de kabul ediyordu; önek listesi de iki kopyaydı.
+## 5. inceleme turu — `pickingUnsafe` neyin güvenliğini söylüyor
+**Engelleyici (B1).** Bayrak yalnız `SimplifyResult`'tan türetiliyordu: "sadeleştirici topolojiyi değiştirdi mi"
+sorusunun cevabı, "bu mesh'e tıklanabilir mi" cevabı diye yazılıyordu. Sentetik değil **gerçek zincirde** ölçüldü —
+düzeltme öncesi `high` manifesti aynı anda `lossy:true` ve `pickingUnsafe:false` idi, CI geçiriyordu. Görünmeyenler:
+üçgenleme kayıpları, `hole_merge`/`hole_split`, yalnız `part_split`, ve normalizasyonun attığı her şey.
 
-- **Engelleyici (B1) — kaybolan kaynak deliği.** `_drop_artifact_holes` yalnız **çıktıda hâlâ bulunan** delikleri
-  dolaşıyordu: kaynak deliği tamamen kaybolunca incelenecek ring yok, `holeCount` 0'a düşüyor, seviye `lossy:false`, CI
-  `[]`. Eşleşme artık **iki yönlü** (`dropped_hole`), CI yalnız *eklenen* deliğe bakmıyor. İki kalıcı test: biri kaydı,
-  biri denkliğin **delik nedir bilmeden** aynı vakayı yakaladığını gösteriyor.
-- **Y1/Y2 — isim öneki gitti.** `LossEvent(stage, kind, count, area, details)`, kapalı `EVENT_KINDS`, bilinmeyen `kind`'de
-  **FAIL-CLOSED**, `lossy = bool(kayıp kategorisi olayları)`. Şema **tek yerde**; `check_lod_report.py` onu import ediyor
-  ama bayrağı, bütçeyi ve iki denkliği **kendisi** hesaplıyor — ortak sözlük, ayrı cevap.
-- **Y3 — bütçe denkliği.** İl başına `kaynak alan + kaydedilen eklenen − kaydedilen çıkan = çıktı alan`; `kaynak parça −
-  çıktı parça = düşen + birleşme − bölünme − oluşan`; aynısı delikler için. Tutmazsa **build düşer**.
-- **Ö1 — %10 uçurumu.** %10 artık yalnız "işlevsel olarak kaybolmuş parça" politikası; hayatta kalanın kaybı ayrı kayıt
-  (`retainedAreaRatio`, `minPartRetainedAreaRatio`, `severe_shrink` <%50). %11 hem hayatta hem kayıtlı ve %89 bütçenin
-  çıkan tarafında, %9 düşen parça — ikisi de test.
-- **Ö2/Ö3 — oluşan parça.** Özdeşlik yalnız gerçek fixture'da sınanıyordu, sentetik problarda **yanlıştı**; eksik terim
-  eşleşmeyen **çıktı** parçasıydı (`part_created`). Her prob artık aynı denkliği sınıyor, A+B→A+C testi C'yi de.
-- **Ö5 / Ö4.** `topologyChanged` + `pickingUnsafe` manifestin üst düzeyinde, `mergeAddedArea` sahte kara köprüsünün
-  büyüklüğü (üst sınır), CI ikisini kayıtlardan türetiyor. Talimattaki "seçim için high/medium" → **yalnız high**:
-  `medium`'da da 3 birleşme, 3 bölünme, 1 yok olan parça (Artvin) ölçüldü.
-- **I2 — Issue B hazır.** 47.358 "nihai boru hattı" değil **`make_valid` sonrası poligon**; mesh/float32 sıfır-çatlak
-  iddiası ayrı ölçüm olarak ayrıştırıldı; betik CLI'ın `exit code=0 ok=true issues=[]` cevabını artık **basıyor** (ana
-  kanıt, önceden okunup atılıyordu); 48.204 ↔ 48.200 farkı açıklandı. **Issue A'ya dokunulmadı.**
+Artık her olay türü `changes_topology`'yi kendisi beyan ediyor; `pickingUnsafe` = kayıp **veya** topoloji değişikliği,
+**üç adımın hepsi** üzerinden. `lossy:true` + `pickingUnsafe:false` *ulaşılamaz* (her kayıp türü güvensiz, import anında
+doğrulanıyor) ve CI bu ilişkiyi manifest üzerinde ayrıca denetliyor. Sınır kayması ve onarım
+(`artifact_hole_removed`) tetiklemiyor: iddia topolojik aynılık, şekil aynılığı değil — her yerde `true` olan bayrak
+bir şey söylemez. Tam tanım `docs/mesh-format.md`'de.
+
+**Sonuç, sessiz kalmasın diye:** gerçek TUR ADM1 zincirinde artık **hiçbir seviye seçim için güvenli değil** — üçü de
+`pickingUnsafe:true`. `high`'ın tek sebebi normalizasyonun attığı **7 adacık** (İstanbul 5, Muğla 2; 2,0–6,1 m²); kendi
+sadeleştirmesi tertemiz ve bunu `simplification.topologyChanged:false` söylüyor. 4. turun "kanıtlanmış tek güvenli
+seviye `high`" cümlesi **daraltıldı**: güvenli seçim, normalizasyonun bu 7 adacığı atmayı bırakmasını gerektiriyor.
 
 ## Bilinen eksikler ve riskler
-- **Bütçe denkliğinin sınırı, fazla iddia edilmesin diye:** alan tarafında kayıtlar ölçümü üreten aynı ayrıştırmadan
-  türüyor, doğru bir build'de iki taraf inşaat gereği uyuşur; yakaladığı şey ayrıştırmanın **dışında** değişen geometri.
-  **Asıl dişler sayma denkliklerinde** — olayların iddiasını geometrinin gerçeğiyle karşılaştırıyor, B1 böyle yakalandı.
 - **Çatlak testi eksiksiz değil.** Boşluk metriği yalnız **kapalı** boşlukları görür, paylaşılan-vertex testi çift başına
-  **en az bir** ortak vertex arar; il-il iç sınırlar yakalanıyor, kapatmak vertex dizisi karşılaştırması ister.
+  **en az bir** ortak vertex arar; kapatmak vertex dizisi karşılaştırması ister.
 - **"Alan kaybı yok" doğru değil.** `low`'da kaynak alanın **1.236 km²'si** kapsanmıyor, çıktı kaynakta olmayan 1.357 km²
   kapsıyor; en kötü parça **%15,6'sında** kalıyor, 40 parça %50 altında (`high`'da 4,86 km²).
-- **geoBoundaries dosyaları importer'a olduğu gibi girmiyor:** `shapeGroup` alpha-3 → alpha-2; 1e-9 deg² altındaki **7
-  gerçek adacık** (2,0–6,1 m²) `dropped_islet` olarak sayılıp manifeste giriyor ama **veriden çıkıyorlar**.
-- `low`'da 22 sahte delik oluşup siliniyor (`artifact_hole_removed` — onarım, kayıp değil); hiçbir toleransın hem %25
-  bütçesini hem sıfır sahte deliği sağlamadığı ölçüldü. Docker doğrulanmadı (Faz 0); topojson **1.10 zorunlu**.
+- **geoBoundaries dosyaları importer'a olduğu gibi girmiyor:** `shapeGroup` alpha-3 → alpha-2; 1e-9 deg² altındaki 7
+  gerçek adacık manifeste `dropped_islet` olarak giriyor ama **veriden çıkıyor** — üç seviyeyi birden `lossy` ve
+  `pickingUnsafe` yapan tek sebep bu.
+- `low`'da 19 sahte delik oluşup siliniyor (11.617 m², onarım — kayıp değil); hiçbir toleransın hem %25 bütçesini hem
+  sıfır sahte deliği sağlamadığı ölçüldü. Docker doğrulanmadı (Faz 0); topojson **1.10 zorunlu**.
+
+## Bilinen eksikler — Faz 3 backlog
+5. turda bulundu, **bilinçli düzeltilmedi**: B1 dışındakiler kod değişikliği istemiyor.
+1. **Delik büzülmesi görünmüyor.** `_correspondence` (`simplify.py:908`) kesişimi **küçük** geometrinin alanına bölüyor;
+   kaynak deliğinin %99'u yok olup %1'i kalsa "%100 eşleşme" — delik sayısı 1→1, üç denklik de geçiyor, `lossy:false`.
+   Alan `boundary_advance`'e yazıldığı için sessiz değil, **yapısal** kayıp görünmüyor. Parçalarda bunu
+   `retainedAreaRatio`/`severe_shrink` kapatıyor, deliklerde karşılığı yok → `severe_hole_shrink` eklenmeli.
+2. **Manifest doğrulaması tam fail-closed değil.** `lossy` yoksa veya `"false"` **metni** ise denetçi kabul ediyor;
+   `category`/`side` doğrulanmadan yeniden türetiliyor (`events_from_manifest`, `loss.py:458`); `NaN` alan kabul
+   ediliyor, alan bütçesi fail-open kalabiliyor. → zorunlu boolean `lossy`, doğrulanan `category`/`side`, sonlu sayı
+   şartı. (5. turda yalnız iki istemci bayrağı için tip denetimi eklendi.)
+3. **Bütçe denkliklerinin sınırı, fazla iddia edilmesin.** Denklikler **bağımsız kanıt değil**, aynı muhasebenin
+   tutarlılık kontrolü: alan kayıtları ölçümü üreten aynı parça ayrıştırmasından türüyor. Doğrulandı: gerçek bir
+   `dropped_part` yerine `part_merge` + `boundary_retreat` kaydedilirse **üç denklik de geçiyor**, `lossy:false` çıkıyor.
+   Yakalanan **eksik** kayıt; yanlış **sınıflandırma** yakalanmıyor. (Doğal veride `account_for`'un böyle bir
+   sınıflandırma ürettiği bulunamadı — gerçek A+B→A girdisi `dropped_part` + `lossy:true` veriyor.)
+4. **%10 eşiği bir politika kararı.** %11'ini koruyan parça hâlâ `change`, `loss` değil. Görünür
+   (`retainedAreaRatio` + `severe_shrink`) ama sınıflandırmanın kendisi bilinçli tercih — belgelenmiş olsun.
 
 ## Tıkanmalar
 **Bir tane, çözüldü.** `topology-safe` en kritik testi geçemiyordu; kendi implementasyonuma **geçmedim**, ölçümleri sunup
@@ -81,4 +89,5 @@ Faz 3 önkoşulu **hazır**: üç seviye deterministik, ayrı dizinlerde, önced
 ## Değişen dosyalar
 `src/geometry_api/`: `loss.py` (yeniden yazıldı), `simplify.py`, `build.py`, `triangulate.py` · `tests/`: `test_loss.py`
 (yeni), `test_lod.py`, `test_lod_scripts.py`, `test_build.py`, `test_triangulate.py` · `scripts/`: `build_lod.py`,
-`check_lod_report.py`, `repro_territorykit_finding.py` · `docs/`: `territorykit-simplification-finding.md`, `PROJE-TALIMATI.md`
+`check_lod_report.py`, `repro_territorykit_finding.py` · `docs/`: `mesh-format.md`, `PROJE-TALIMATI.md`,
+`territorykit-simplification-finding.md`
