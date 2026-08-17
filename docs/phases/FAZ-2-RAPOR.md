@@ -1,7 +1,7 @@
 # Faz 2 — LOD üretimi
 
 Tarih: 2026-08-17 · Durum: Tamamlandı (bir mimari sapma + beş inceleme turu)
-Dal: feat/phase-2-lod-topology · Commit sayısı: 64
+Dal: feat/phase-2-lod-topology · Commit sayısı: 66
 
 ## Ne yapıldı
 TerritoryKit CLI build edildi, zincirde **kaldı** (`import geoboundaries`); `simplify.py` topojson ile **paylaşılan arc**
