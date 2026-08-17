@@ -26,19 +26,25 @@ from geometry_api.routes.common import CACHE_CONTROL_IMMUTABLE, validate_lod
 router = APIRouter()
 
 
-@router.api_route(
-    "/v1/datasets/{dataset_id}/revisions/{revision_id}/mesh/{territory_id}",
-    methods=["GET", "HEAD"],
-)
+_MESH_PATH = "/v1/datasets/{dataset_id}/revisions/{revision_id}/mesh/{territory_id}"
+
+
 def get_mesh(
     request: Request,
     territory_id: str,
     resolved: Annotated[ResolvedRevision, Depends(resolve_pinned_revision)],
     registry: RegistryDep,
-    lod: str = Query(...),
+    lod: str = Query(..., description="Required, no default: 'high' | 'medium' | 'low'"),
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
     accept_encoding: str = Header(default="", alias="Accept-Encoding"),
 ) -> Response:
+    """Download one territory's TKMS mesh at a pinned, immutable revision.
+
+    Serves the precomputed gzip variant when the client accepts it (never compresses at request
+    time), answers `304` on a matching `If-None-Match`, and always carries a strong `ETag` plus
+    `Cache-Control: public, max-age=31536000, immutable`. `HEAD` returns the same headers with
+    no body.
+    """
     validate_lod(lod)
     try:
         entry = registry.territory_entry(resolved, lod, territory_id)
@@ -72,3 +78,10 @@ def get_mesh(
         headers=headers,
         media_type="application/octet-stream",
     )
+
+
+# Registered as two routes rather than one @api_route(methods=["GET", "HEAD"]) — FastAPI derives
+# an operation id from (function name, path) and does not factor in the method, so a single
+# combined route produced two OpenAPI operations sharing one id. Explicit, distinct ids fix that.
+router.add_api_route(_MESH_PATH, get_mesh, methods=["GET"], operation_id="get_mesh")
+router.add_api_route(_MESH_PATH, get_mesh, methods=["HEAD"], operation_id="head_mesh")

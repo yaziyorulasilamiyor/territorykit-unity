@@ -44,6 +44,10 @@ def list_territories(
     parent_id: str | None = Query(default=None, alias="parentId"),
     administrative_level: int | None = Query(default=None, alias="administrativeLevel"),
 ) -> dict[str, Any]:
+    """Cursor-paginated territory list for one level, filterable by `bbox` (local metres),
+    `parentId` and `administrativeLevel`. The cursor is bound to the revision, lod and exact
+    filter set it was issued under; reusing it under different filters is rejected rather than
+    silently reapplied."""
     validate_lod(lod)
     resolved_limit = limit if limit is not None else settings.territories_page_size_default
     if resolved_limit > settings.territories_page_size_max:

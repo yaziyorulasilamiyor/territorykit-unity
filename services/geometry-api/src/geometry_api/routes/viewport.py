@@ -32,6 +32,8 @@ def get_viewport(
     limit: int | None = Query(default=None, ge=1),
     cursor: str | None = Query(default=None),
 ) -> dict[str, Any]:
+    """Cursor-paginated list of territory ids intersecting `bbox` (required, local metres) at
+    one level — id list only; fetch meshes for the returned ids via the mesh or batch endpoint."""
     validate_lod(lod)
     bbox_tuple = parse_bbox(bbox)
     resolved_limit = limit if limit is not None else settings.territories_page_size_default

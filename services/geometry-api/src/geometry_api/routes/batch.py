@@ -61,6 +61,14 @@ def post_mesh_batch(
     cache: BatchCacheDep,
     metrics: MetricsDep,
 ) -> Response:
+    """Bundle several territories' meshes into one TKMB container at a pinned revision.
+
+    Requested ids that don't exist are listed inside the container itself (`missing`), never as
+    a `404` — the batch URL is always valid, its contents may just be partial. Deduplicates
+    requested ids and always returns them TOC-sorted by id, regardless of request order, so the
+    same set of ids produces byte-identical output (and hits the same cache entry) however it
+    was listed.
+    """
     validate_lod(body.lod)
     ids = sorted(set(body.territoryIds))
     if len(ids) > settings.batch_max_territories:

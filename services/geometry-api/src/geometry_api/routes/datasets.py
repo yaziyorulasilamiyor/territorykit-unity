@@ -21,6 +21,7 @@ router = APIRouter()
 
 @router.get("/v1/datasets")
 def list_datasets(response: Response, registry: RegistryDep) -> dict[str, Any]:
+    """List every published dataset with its id, name, current revision and territory count."""
     items: list[dict[str, Any]] = []
     for dataset_id in registry.known_dataset_ids():
         try:
@@ -48,6 +49,10 @@ def get_dataset(
     resolved: Annotated[ResolvedRevision, Depends(resolve_revision)],
     registry: RegistryDep,
 ) -> dict[str, Any]:
+    """Dataset metadata: origin, bounds, and every level's stats plus its `lossy`/
+    `topologyChanged`/`pickingUnsafe` flags — read this *before* downloading a mesh to pick a
+    level Unity can trust for picking. Accepts `?revision=` to pin to a past (still retained)
+    revision instead of the current one."""
     levels: list[dict[str, Any]] = []
     high_manifest: dict[str, Any] | None = None
     for lod in LOD_LEVELS:

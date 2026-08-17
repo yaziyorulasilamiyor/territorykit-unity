@@ -62,4 +62,6 @@ def ready(registry: RegistryDep) -> JSONResponse:
 
 @router.get("/metrics")
 def metrics_endpoint(metrics: MetricsDep) -> dict[str, Any]:
+    """In-process request/latency/cache counters (schemaVersion 1). Per-process, not durable, and
+    not aggregated across `uvicorn --workers N>1` — see `geometry_api.metrics`."""
     return metrics.snapshot()
