@@ -71,8 +71,13 @@ def test_builds_every_province(sample_dataset: Dataset, tmp_path: Path) -> None:
     assert simplification["lod"] == "high"
     assert simplification["partCount"] == simplification["sourcePartCount"] == 712
     assert simplification["holeCount"] == simplification["sourceHoleCount"] == 0
-    assert simplification["skippedParts"] == simplification["skippedRings"] == 0
     assert manifest["lossy"] is False
+    assert [item["kind"] for item in manifest["loss"]["events"]] == [
+        "boundary_advance",
+        "boundary_retreat",
+    ], "high moves boundaries and loses nothing; both facts have to be on the record"
+    assert manifest["topologyChanged"] is False
+    assert manifest["pickingUnsafe"] is False
 
 
 def test_output_is_byte_identical_across_runs(sample_dataset: Dataset, tmp_path: Path) -> None:
@@ -298,11 +303,10 @@ def test_allow_lossy_accepts_the_loss_and_records_it(
 
     manifest = _read_manifest(output)
     entry = manifest["territories"][0]
-    assert entry["skippedRings"] == 1
-    assert entry["skippedParts"] == 0
-    assert entry["degenerateTriangles"] == 0
-    assert manifest["totals"]["skippedRings"] == 1
+    assert entry["lossy"] is True
+    assert [(item["kind"], item["count"]) for item in entry["lossEvents"]] == [("skipped_ring", 1)]
     assert manifest["lossy"] is True
+    assert _event_counts(manifest)["skipped_ring"] == 1
     assert "lost 0 part(s), 1 hole(s) and 0 degenerate triangle(s)" in capsys.readouterr().out
 
 
@@ -311,8 +315,8 @@ def test_a_part_lost_to_degenerate_triangles_also_fails_the_build(
 ) -> None:
     """The loss path that reached the manifest as zeroes before.
 
-    A part whose triangles are all degenerate used to leave skippedParts: 0, skippedRings: 0 and
-    lossy: false while the part itself was gone.
+    A part whose triangles are all degenerate used to leave every counter at 0 and lossy: false
+    while the part itself was gone.
     """
     source = fixtures_dir / "vanishing-part.geojson"
     assert main(["--input", str(source), "--output", str(tmp_path / "out"), "--quiet"]) == 1
@@ -323,8 +327,9 @@ def test_a_part_lost_to_degenerate_triangles_also_fails_the_build(
     entry = _read_manifest(output)["territories"][0]
 
     assert entry["partCount"] == 2, "the manifest must describe the mesh, not the input"
-    assert entry["skippedParts"] == 1
-    assert entry["degenerateTriangles"] > 0
+    counts = {item["kind"]: item["count"] for item in entry["lossEvents"]}
+    assert counts["skipped_part"] == 1
+    assert counts["degenerate_triangle"] > 0
     assert _read_manifest(output)["lossy"] is True
 
 
@@ -333,14 +338,18 @@ def test_lossless_builds_record_zero_loss(sample_dataset: Dataset, tmp_path: Pat
     manifest = _read_manifest(tmp_path)
 
     assert manifest["lossy"] is False
-    assert manifest["totals"]["skippedParts"] == 0
-    assert manifest["totals"]["skippedRings"] == 0
-    assert manifest["totals"]["degenerateTriangles"] == 0
+    assert not [item for item in manifest["loss"]["events"] if item["category"] == "loss"], (
+        "a lossless build has no loss events at all, rather than a set of zeroed counters"
+    )
     assert manifest["totals"]["repairedTerritories"] == 0
     for entry in manifest["territories"]:
-        assert entry["skippedParts"] == 0 and entry["skippedRings"] == 0, entry["name"]
-        assert entry["degenerateTriangles"] == 0, entry["name"]
+        assert entry["lossEvents"] == [], entry["name"]
+        assert entry["lossy"] is False, entry["name"]
         assert entry["repaired"] is False
+
+
+def _event_counts(manifest: dict) -> dict[str, int]:
+    return {item["kind"]: item["count"] for item in manifest["loss"]["events"]}
 
 
 def test_repair_invalid_flag_is_recorded_in_the_manifest(

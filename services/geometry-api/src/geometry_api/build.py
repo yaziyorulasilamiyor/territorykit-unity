@@ -24,13 +24,21 @@ from typing import Any
 
 from .encoding import UINT16_MAX_VERTEX_COUNT, encode_tkms
 from .loader import Dataset, DatasetError, InvalidGeometryPolicy, Territory, load_dataset
-from .loss import derive_lossy
+from .loss import (
+    STAGE_SIMPLIFICATION,
+    STAGE_TRIANGULATION,
+    STAGE_UPSTREAM,
+    LossLedger,
+    LossSchemaError,
+    ledger_from_manifest,
+)
 from .projection import Origin, ProjectionError, project_geometry
 from .simplify import (
     DEFAULT_MAX_DROPPED_PART_AREA,
     DEFAULT_MAX_TOTAL_DROPPED_AREA,
     LOD_HIGH,
     LOD_LEVELS,
+    PART_SEVERE_SHRINK_RATIO,
     SimplifyError,
     SimplifyResult,
     simplify_dataset,
@@ -94,7 +102,10 @@ class MeshEntry:
             "indexFormat": "uint32" if self.uses_uint32_indices else "uint16",
             "byteLength": len(self.payload),
             "bboxLocal": list(self.bounds_local),
-            **self.loss.as_manifest_dict(),
+            "lossy": self.is_lossy,
+            # Typed events rather than three named counters, so a reader of one territory sees
+            # the same vocabulary as a reader of the level.
+            "lossEvents": [item.as_dict() for item in self.loss.as_events()],
             "repaired": self.territory.repaired,
             "parentId": self.territory.parent_id,
             "neighborIds": list(self.territory.neighbor_ids),
@@ -165,43 +176,62 @@ def collect_loss(
     entries: Sequence[MeshEntry],
     simplification: SimplifyResult | None,
     upstream: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Every way this build lost geometry, in one place, with one flag over all of them.
+) -> LossLedger:
+    """Every stage's typed records in one ledger, with one flag derived from all of them.
 
-    The flag comes from ``loss.derive_lossy`` reading the **records** of each stage — the counts,
-    the areas, the lists of what went missing. It does not read any stage's own ``lossy``
-    boolean, including the one an upstream JSON file supplies: two review rounds in a row found
-    this function trusting a boolean that disagreed with the numbers beside it.
+    The flag comes from the **events** each stage recorded, read through the closed schema in
+    ``loss.py``. It does not read any stage's own ``lossy`` boolean, including the one an
+    upstream JSON file supplies: three review rounds in a row found this function trusting a
+    boolean that disagreed with the numbers beside it, and a fourth found the naming convention
+    that was supposed to make the numbers self-describing.
 
-    Concretely, the two cases that used to slip through and now cannot:
+    The cases that used to slip through and now cannot:
 
     * ``simplification`` recorded a 20.000 m² dropped part while its ``skippedParts`` counter
-      read 0. Asking ``simplification.loss.is_lossy`` said "nothing lost"; asking the records
-      finds ``droppedParts`` and ``droppedPartArea``.
+      read 0. The counter is gone; a dropped part *is* a ``dropped_part`` event.
     * ``upstream`` arrived as ``{"droppedParts": 7, "lossy": false}`` and was taken at its word.
-      The boolean is now ignored on the way in and cross-checked by
-      ``scripts/check_lod_report.py`` on the way out, so a lying producer fails CI rather than
-      quietly relabelling seven dropped islets as nothing.
+      The boolean is never read, on the way in or the way out.
+    * ``removedRings`` set the flag while ``collapsedParts`` did not, because one matched a
+      prefix list and the other did not. There is no prefix list; a kind outside the schema
+      raises ``LossSchemaError`` rather than reading as "nothing happened".
 
-    Adding a fourth loss source means adding it to ``sources`` with fields named by the
-    convention in ``loss.py``; the flag then follows without this function changing.
+    Adding a fifth loss source means adding a kind to ``loss.EVENT_KINDS`` and emitting it. The
+    flag follows without this function changing, and so does CI's independent recomputation,
+    because both read the same schema.
     """
-    triangulation = {
-        key: sum(entry.loss.as_manifest_dict()[key] for entry in entries)
-        for key in GeometryLoss().as_manifest_dict()
-    }
-    simplification_block = simplification.as_manifest_dict() if simplification else None
-    upstream_block = dict(upstream) if upstream else None
-    sources: dict[str, Any] = {
-        "triangulation": triangulation,
-        "simplification": simplification_block,
-        "upstream": upstream_block,
-    }
+    triangulation = GeometryLoss(
+        skipped_parts=sum(entry.loss.skipped_parts for entry in entries),
+        skipped_rings=sum(entry.loss.skipped_rings for entry in entries),
+        degenerate_triangles=sum(entry.loss.degenerate_triangles for entry in entries),
+    )
 
-    return {
-        **sources,
-        "lossy": derive_lossy(triangulation, simplification_block, upstream_block),
-    }
+    events = list(triangulation.as_events())
+    stages = [STAGE_TRIANGULATION]
+    if simplification is not None:
+        events.extend(simplification.ledger.events)
+        stages.append(STAGE_SIMPLIFICATION)
+    if upstream is not None:
+        events.extend(_upstream_events(upstream))
+        stages.append(STAGE_UPSTREAM)
+    return LossLedger.of(events, stages_recorded=stages)
+
+
+def _upstream_events(upstream: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Read the ledger out of what ``scripts/build_lod.py`` wrote, refusing anything else.
+
+    Fail-closed on purpose. A file this build cannot parse is not a file that lost nothing, and
+    the previous version's answer to an unrecognised shape was to find no matching keys in it and
+    move on — which is how seven dropped islets were once reported as no loss at all.
+    """
+    block = upstream.get("loss", upstream)
+    events = ledger_from_manifest(block if isinstance(block, Mapping) else None).events
+    off_stage = sorted({item.stage for item in events} - {STAGE_UPSTREAM})
+    if off_stage:
+        raise LossSchemaError(
+            f"--upstream-loss carries events for stage(s) {', '.join(off_stage)}; a file "
+            f"describing what happened before this build can only speak for '{STAGE_UPSTREAM}'"
+        )
+    return events
 
 
 def build_manifest(
@@ -216,7 +246,7 @@ def build_manifest(
     min_y = min(entry.bounds_local[1] for entry in entries)
     max_x = max(entry.bounds_local[2] for entry in entries)
     max_y = max(entry.bounds_local[3] for entry in entries)
-    loss = collect_loss(entries, simplification, upstream_loss)
+    ledger = collect_loss(entries, simplification, upstream_loss)
 
     return {
         "datasetId": dataset.id,
@@ -238,23 +268,48 @@ def build_manifest(
             "vertices": sum(entry.vertex_count for entry in entries),
             "triangles": sum(entry.triangle_count for entry in entries),
             "bytes": sum(len(entry.payload) for entry in entries),
-            # Summed generically from the loss structure, so a new loss field reaches the
-            # manifest totals without a second place needing to learn about it.
-            **{
-                key: sum(entry.loss.as_manifest_dict()[key] for entry in entries)
-                for key in GeometryLoss().as_manifest_dict()
-            },
             "repairedTerritories": sum(1 for entry in entries if entry.territory.repaired),
         },
-        # One flag over every loss source. The per-stage counts stay separate under "loss" so it
-        # is still clear which stage lost what, but no stage can be lossy while this reads false.
-        "lossy": loss["lossy"],
-        "loss": loss,
+        # One flag over every stage, derived from the events under "loss" and from nothing else.
+        # No stage can be lossy while this reads false, and nothing can be lossy without an
+        # event naming what went missing.
+        "lossy": ledger.is_lossy,
+        "loss": ledger.as_manifest_dict(),
+        # What phases 4 and 5 read before they trust a level for picking. "Nothing was lost" and
+        # "the shape is the same" are different claims: a level can lose nothing and still draw a
+        # strait as land, and a click there selects a province the source says is water.
+        **_client_flags(simplification),
         # Kept at the top level as well: phase 1's manifest readers and the CI report checker
         # already address it here, and moving it would break them for no gain.
         "simplification": simplification.as_manifest_dict() if simplification else None,
         "sourceMetadata": dict(dataset.metadata),
         "territories": [entry.as_manifest_entry() for entry in entries],
+    }
+
+
+def _client_flags(simplification: SimplifyResult | None) -> dict[str, Any]:
+    """The two booleans a renderer needs, stated rather than left to be inferred.
+
+    Phase 2 measured the topology changes and wrote them into the manifest, but nothing on the
+    Unity side would have had a field to read: ``topologyChanges`` is a block of counts, and
+    asking a client to decide "is 30 merges a problem?" is asking it to re-derive a policy.
+    These two say it outright, for phases 4 and 5 to gate on.
+
+    ``pickingUnsafe`` is the sharper one. A merge draws a strait as land and a dropped enclave
+    draws a lake as land, so a ray that used to miss the province now hits it — the click is
+    wrong, not merely imprecise. A dropped part is the mirror image: the click misses a place
+    the source says exists. All three set it.
+    """
+    if simplification is None:
+        return {"topologyChanged": False, "pickingUnsafe": False}
+    return {
+        "topologyChanged": simplification.topology_changed,
+        "pickingUnsafe": bool(
+            simplification.merges
+            or simplification.created_parts
+            or simplification.dropped_hole_count
+            or simplification.dropped_parts
+        ),
     }
 
 
@@ -309,9 +364,10 @@ def _check_simplification(result: SimplifyResult, allow_lossy: bool) -> None:
     claims to still be the source geometry, so a part or hole lost here is a build failure
     rather than a line in the manifest nobody reads.
 
-    Asks ``result.is_lossy``, not ``result.loss.is_lossy``: the latter sees only the three
-    counters, so a dropped part in a build whose part count happened to balance out would walk
-    straight through this gate.
+    Asks ``result.is_lossy``, which reads the ledger's loss events. Merges and splits are
+    recorded as changes rather than losses and deliberately do not fail this gate — see
+    ``docs/PROJE-TALIMATI.md`` §FAZ 2 — but a dropped part or a vanished enclave does, whatever
+    the part count happens to add up to.
     """
     if result.lod != LOD_HIGH or not result.is_lossy or allow_lossy:
         return
@@ -320,8 +376,8 @@ def _check_simplification(result: SimplifyResult, allow_lossy: bool) -> None:
         dropped = f" (including {result.dropped_area:.1f} m² of dropped parts)"
     raise BuildError(
         f"simplification at lod '{LOD_HIGH}' (tolerance {result.tolerance}) lost "
-        f"{result.loss.describe()}{dropped}, but that level is supposed to preserve the source. "
-        f"Re-run with --allow-lossy to accept it, or lower the tolerance."
+        f"{result.ledger.describe()}{dropped}, but that level is supposed to preserve the "
+        f"source. Re-run with --allow-lossy to accept it, or lower the tolerance."
     )
 
 
@@ -334,16 +390,27 @@ def _print_simplification(result: SimplifyResult, stream: Any) -> None:
         f"{result.source_hole_count} → {result.hole_count}",
         file=stream,
     )
-    if result.merges or result.splits:
+    if result.topology_changed:
         print(
-            f"  topology changed: {result.merges} part merge(s), {result.splits} split(s) — "
-            f"no area lost, but the component structure differs from the source",
+            f"  topology changed: {result.merges} part merge(s), {result.splits} split(s), "
+            f"{result.created_parts} created — no area lost, but the component structure differs "
+            f"from the source, and the merges add {result.merge_added_area:.1f} m² of land the "
+            f"source called water (upper bound)",
             file=stream,
         )
+    print(
+        f"  area: source {result.source_area / 1e6:.1f} km² → output "
+        f"{result.output_area / 1e6:.1f} km² ({result.removed_area / 1e6:.3f} km² of the source "
+        f"is no longer covered, {result.added_area / 1e6:.3f} km² is new); retained "
+        f"{result.retained_area_ratio:.4%}, worst part kept "
+        f"{result.min_retained_area_ratio:.1%} ({result.severe_shrink_count} part(s) under "
+        f"{PART_SEVERE_SHRINK_RATIO:.0%})",
+        file=stream,
+    )
     if result.is_lossy:
         print(
-            f"  simplification dropped {result.loss.describe()}, {result.dropped_area:.1f} m² "
-            f"in total (recorded in {MANIFEST_FILENAME} under 'simplification')",
+            f"  simplification lost {result.ledger.describe()} "
+            f"(recorded in {MANIFEST_FILENAME} under 'loss')",
             file=stream,
         )
 
@@ -470,11 +537,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _check_simplification(simplification, allow_lossy=args.allow_lossy)
         entries = build_meshes(simplification.dataset, lod=args.lod, allow_lossy=args.allow_lossy)
-    except (DatasetError, BuildError, SimplifyError) as exc:
+        # Inside the try: a --upstream-loss file this build cannot parse is a failure, not a
+        # traceback and not a silent "then nothing was lost upstream".
+        manifest = build_manifest(dataset, entries, args.lod, simplification, upstream_loss)
+    except (DatasetError, BuildError, SimplifyError, LossSchemaError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    manifest = build_manifest(dataset, entries, args.lod, simplification, upstream_loss)
     write_build(args.output, entries, manifest, clean=args.clean)
 
     if not args.quiet:
