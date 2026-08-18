@@ -18,6 +18,7 @@ htmlcov/
 [Bb]uild/
 [Bb]uilds/
 [Ll]ogs/
+UserSettings/
 *.csproj
 *.sln
 *.user
