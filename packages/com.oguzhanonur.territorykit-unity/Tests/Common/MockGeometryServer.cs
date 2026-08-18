@@ -48,6 +48,14 @@ namespace TerritoryKit.Unity.Tests
         /// <summary>JSON returned by <c>GET /v1/datasets/{id}/territories</c>, in page order.</summary>
         public List<string> TerritoryPages { get; } = new List<string>();
 
+        /// <summary>
+        /// JSON returned by <c>GET /v1/datasets/{id}/viewport</c>, in page order. Served
+        /// regardless of the requested <c>bbox</c> — this is a transport fake, not a spatial one;
+        /// callers that need "only these ids are in view" drive it by queuing the page a real
+        /// server's spatial filter would have produced for that camera position.
+        /// </summary>
+        public List<string> ViewportPages { get; } = new List<string>();
+
         /// <summary>TKMS payload per territory id, served by the single-mesh endpoint.</summary>
         public Dictionary<string, byte[]> Meshes { get; } = new Dictionary<string, byte[]>();
 
@@ -160,6 +168,20 @@ namespace TerritoryKit.Unity.Tests
 
                 WriteJson(context, 200,
                     page < TerritoryPages.Count ? TerritoryPages[page] : "{\"items\":[]}");
+                return;
+            }
+
+            if (path.EndsWith("/viewport", StringComparison.Ordinal))
+            {
+                int page = 0;
+                string cursor = context.Request.QueryString["cursor"];
+                if (!string.IsNullOrEmpty(cursor))
+                {
+                    int.TryParse(cursor, NumberStyles.Integer, CultureInfo.InvariantCulture, out page);
+                }
+
+                WriteJson(context, 200,
+                    page < ViewportPages.Count ? ViewportPages[page] : "{\"territoryIds\":[]}");
                 return;
             }
 

@@ -135,6 +135,61 @@ namespace TerritoryKit.Unity
             return all;
         }
 
+        /// <summary>Fetches one page of territory ids intersecting <paramref name="bboxLocal"/> at one level.</summary>
+        /// <param name="bboxLocal">
+        /// <c>minX,minY,maxX,maxY</c> in local metres — the same space TKMS meshes and
+        /// <c>DatasetInfo.boundsLocal</c> use, not WGS84 degrees (<c>docs/api.md</c>).
+        /// </param>
+        public async Task<ViewportPage> GetViewportAsync(string datasetId, string lod,
+            string bboxLocal, string cursor = null, int limit = 0,
+            CancellationToken cancellationToken = default)
+        {
+            // bboxLocal is not escaped: it is always built by this package's own FormatBbox-style
+            // code as "minX,minY,maxX,maxY" (digits, '.', '-', ','), never from a server or user
+            // value, and docs/api.md's wire contract for this parameter is literal, unescaped
+            // commas -- percent-encoding them would still decode correctly server-side, but
+            // logging/debugging a request is easier when the query string reads the way the docs
+            // show it.
+            var url = new StringBuilder(_baseUrl)
+                .Append("/v1/datasets/").Append(Uri.EscapeDataString(datasetId))
+                .Append("/viewport?bbox=").Append(bboxLocal)
+                .Append("&lod=").Append(Uri.EscapeDataString(lod));
+            if (limit > 0)
+            {
+                url.Append("&limit=").Append(limit.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (!string.IsNullOrEmpty(cursor))
+            {
+                url.Append("&cursor=").Append(Uri.EscapeDataString(cursor));
+            }
+
+            return await GetJsonAsync<ViewportPage>(url.ToString(), cancellationToken)
+                .ConfigureAwait(true);
+        }
+
+        /// <summary>Walks every page of the viewport listing and returns every id.</summary>
+        public async Task<List<string>> GetAllViewportIdsAsync(string datasetId, string lod,
+            string bboxLocal, CancellationToken cancellationToken = default)
+        {
+            var all = new List<string>();
+            string cursor = null;
+            do
+            {
+                ViewportPage page = await GetViewportAsync(datasetId, lod, bboxLocal, cursor, 0,
+                    cancellationToken).ConfigureAwait(true);
+                if (page.territoryIds != null)
+                {
+                    all.AddRange(page.territoryIds);
+                }
+
+                cursor = page.nextCursor;
+            }
+            while (!string.IsNullOrEmpty(cursor));
+
+            return all;
+        }
+
         /// <summary>Downloads and decodes one TKMS mesh.</summary>
         /// <remarks>The returned mesh is the caller's to destroy.</remarks>
         public async Task<Mesh> GetMeshAsync(string datasetId, string revisionId,
