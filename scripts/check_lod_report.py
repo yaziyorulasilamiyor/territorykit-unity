@@ -41,12 +41,61 @@ __all__ = [
     "STAGES",
     "check",
     "main",
+    "sentinel_failures",
 ]
+
+
+def sentinel_failures(
+    report: dict[str, Any],
+    expect_high_vertices: int | None,
+    expect_territory_count: int | None,
+) -> list[str]:
+    """Compare the ladder against numbers pinned for one specific dataset.
+
+    These are deliberately **not** part of :func:`check`. That function also gates
+    ``publish_dataset.py``, which has to accept any dataset; an exact vertex count belongs to
+    the Turkish ADM1 file and to nothing else. CI names the dataset, so CI states the numbers.
+
+    The point is the same as phase 1's Muğla sentinel: the chain is deterministic, so if these
+    move, either the source data or something in the pipeline changed, and the change should
+    have to be acknowledged rather than absorbed silently.
+    """
+    failures: list[str] = []
+    levels = report.get("levels", {})
+    high = levels.get("high")
+    if high is None:
+        return ["report has no 'high' level to compare against"]
+
+    if expect_high_vertices is not None and high["vertices"] != expect_high_vertices:
+        failures.append(
+            f"high has {high['vertices']} vertices, expected exactly {expect_high_vertices}; "
+            f"the dataset or the pipeline changed"
+        )
+
+    if expect_territory_count is not None and high["territoryCount"] != expect_territory_count:
+        failures.append(
+            f"high has {high['territoryCount']} territories, expected exactly "
+            f"{expect_territory_count}"
+        )
+
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python scripts/check_lod_report.py")
     parser.add_argument("report", type=Path, help="path to lod-report.json")
+    parser.add_argument(
+        "--expect-high-vertices",
+        type=int,
+        default=None,
+        help="exact vertex total the 'high' level must have; pins one specific dataset",
+    )
+    parser.add_argument(
+        "--expect-territory-count",
+        type=int,
+        default=None,
+        help="exact territory count every level must have",
+    )
     args = parser.parse_args(argv)
 
     if not args.report.exists():
@@ -55,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report: dict[str, Any] = json.loads(args.report.read_text(encoding="utf-8"))
     failures = check(report)
+    failures += sentinel_failures(report, args.expect_high_vertices, args.expect_territory_count)
 
     if failures:
         print(f"{len(failures)} expectation(s) failed:", file=sys.stderr)

@@ -798,3 +798,53 @@ def test_high_recording_any_simplification_loss_is_caught() -> None:
     failures = check(report)
 
     assert any("high recorded loss in simplification" in failure for failure in failures), failures
+
+
+# --------------------------------------------------------------------------------------------
+# check_lod_report sentinels
+#
+# The dataset-specific numbers. They live in the CLI rather than in check(), because check()
+# also gates publish_dataset.py and has to accept datasets that are not this one.
+# --------------------------------------------------------------------------------------------
+
+
+def test_sentinels_pass_when_the_numbers_match() -> None:
+    report = _healthy_report()
+    expected = report["levels"]["high"]["vertices"]
+    count = report["levels"]["high"]["territoryCount"]
+
+    assert check_lod_report.sentinel_failures(report, expected, count) == []
+
+
+def test_a_changed_high_vertex_total_is_caught() -> None:
+    """Phase 2 measured 240,379 vertices at high and the chain is deterministic.
+
+    So a different number means the source file or some stage of the pipeline moved. That is
+    allowed to happen, but it has to be acknowledged by changing the number in CI rather than
+    absorbed silently -- the same role Muğla's vertex count plays in phase 1.
+    """
+    report = _healthy_report()
+    report["levels"]["high"]["vertices"] += 1
+
+    failures = check_lod_report.sentinel_failures(
+        report, _healthy_report()["levels"]["high"]["vertices"], None
+    )
+
+    assert any("the dataset or the pipeline changed" in failure for failure in failures), failures
+
+
+def test_a_changed_territory_count_is_caught() -> None:
+    report = _healthy_report()
+    report["levels"]["high"]["territoryCount"] = 80
+
+    failures = check_lod_report.sentinel_failures(report, None, 81)
+
+    assert any("expected exactly 81" in failure for failure in failures), failures
+
+
+def test_sentinels_are_skipped_when_no_expectation_is_given() -> None:
+    """publish_dataset.py runs check() over arbitrary datasets; the pins must be opt-in."""
+    report = _healthy_report()
+    report["levels"]["high"]["vertices"] = 12345
+
+    assert check_lod_report.sentinel_failures(report, None, None) == []
