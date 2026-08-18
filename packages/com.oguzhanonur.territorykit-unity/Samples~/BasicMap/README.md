@@ -16,11 +16,17 @@ python scripts/publish_dataset.py --build-dir "$PWD/services/geometry-api/data/b
 ```
 
 ```bash
-uvicorn geometry_api.main:app --app-dir services/geometry-api/src
+uvicorn geometry_api.main:app --host 127.0.0.1 --app-dir services/geometry-api/src
 ```
 
-Pass absolute paths to `build_lod.py`. It runs part of the chain in a subprocess with a
-different working directory, so a relative `--output` resolves against the wrong root.
+Two things that will otherwise cost you an afternoon:
+
+- **Use `127.0.0.1`, not `localhost`** — in the command above and in the scene's Base Url. On
+  Windows `localhost` resolves to the IPv6 `::1` first, while uvicorn binds IPv4 only, so the
+  request fails against a server that is up and serving. `scripts/capture_sample.ps1` hit exactly
+  this.
+- **Pass absolute paths to `build_lod.py`.** It runs part of the chain in a subprocess with a
+  different working directory, so a relative `--output` resolves against the wrong root.
 
 ## Running it
 
@@ -29,7 +35,7 @@ Open `BasicMap.unity` and press Play. The `Territory Map` object carries a
 
 | Field | Default | Notes |
 |---|---|---|
-| Base Url | `http://localhost:8000` | Where the geometry API is listening |
+| Base Url | `http://127.0.0.1:8000` | Where the geometry API is listening |
 | Dataset Id | `tr-adm1` | Must match `--dataset-id` above |
 | Lod | `high` | `high`, `medium` or `low` |
 | Frame Camera On Load | on | Fits the camera to the dataset bounds |

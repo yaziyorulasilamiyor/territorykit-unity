@@ -148,7 +148,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 38b7a921cb2f27f499231a54a5351ad5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  baseUrl: http://localhost:8000
+  baseUrl: http://127.0.0.1:8000
   datasetId: tr-adm1
   lod: high
   targetCamera: {fileID: 596427838}

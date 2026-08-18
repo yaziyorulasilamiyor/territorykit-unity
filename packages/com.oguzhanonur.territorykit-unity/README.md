@@ -29,7 +29,7 @@ Or add it to `Packages/manifest.json` directly:
 ```csharp
 using TerritoryKit.Unity;
 
-var client = new TerritoryClient("http://localhost:8000");
+var client = new TerritoryClient("http://127.0.0.1:8000");
 
 // Metadata first: this is where the revision id and the per-level safety flags come from.
 DatasetInfo dataset = await client.GetDatasetAsync("tr-adm1");

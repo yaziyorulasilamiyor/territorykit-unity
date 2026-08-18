@@ -19,6 +19,8 @@ htmlcov/
 [Bb]uilds/
 [Ll]ogs/
 UserSettings/
+# Package Manager window state; churns on UI interaction, says nothing about the build
+PackageManagerSettings.asset
 *.csproj
 *.sln
 *.user

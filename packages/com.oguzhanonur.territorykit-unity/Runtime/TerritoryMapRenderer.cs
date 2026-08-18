@@ -25,7 +25,9 @@ namespace TerritoryKit.Unity
     {
         [Header("Server")]
         [SerializeField]
-        private string baseUrl = "http://localhost:8000";
+        // 127.0.0.1 rather than localhost: on Windows localhost resolves to ::1 first and
+        // a server bound to IPv4 only is unreachable through it.
+        private string baseUrl = "http://127.0.0.1:8000";
 
         [SerializeField]
         private string datasetId = "tr-adm1";
