@@ -20,11 +20,15 @@ namespace TerritoryKit.Unity
     /// request is disposed immediately, and decoding runs on a worker thread. Only the buffer
     /// uploads come back to the main thread.
     /// <para>
-    /// <b>Caching.</b> There is none, on purpose. UnityWebRequest keeps no HTTP cache and does
-    /// not act on ETag or 304 — its C# reference source has no cache at all, and the only cache
-    /// Unity ships (the <c>Caching</c> class) is for AssetBundles. Every call here goes to the
-    /// network. Because mesh URLs are pinned to an immutable revision, the right answer is a
-    /// disk cache keyed by revision rather than conditional requests; that is Phase 5.
+    /// <b>Caching.</b> <see cref="GetMeshAsync"/> and <see cref="GetMeshBatchAsync"/> stay
+    /// cache-free by design: UnityWebRequest keeps no HTTP cache and does not act on ETag or
+    /// 304 — its C# reference source has no cache at all, and the only cache Unity ships (the
+    /// <c>Caching</c> class) is for AssetBundles. <see cref="GetMeshDataAsync"/> and
+    /// <see cref="GetMeshDataBatchAsync"/> are the phase 5 addition: pass a
+    /// <see cref="MeshDiskCache"/> to the constructor and those two consult it before the
+    /// network, because mesh URLs are pinned to an immutable revision and a disk cache keyed by
+    /// revision needs no conditional request to stay correct. Metadata and territory listing
+    /// calls never touch the cache; only mesh bytes are worth the disk I/O.
     /// </para>
     /// <para>
     /// <b>Compression.</b> <c>Accept-Encoding</c> is never set here. Unity sets it to the
@@ -36,9 +40,16 @@ namespace TerritoryKit.Unity
     public sealed class TerritoryClient
     {
         private readonly string _baseUrl;
+        private readonly MeshDiskCache _cache;
 
         /// <param name="baseUrl">Root of the API, for example <c>http://localhost:8000</c>.</param>
-        public TerritoryClient(string baseUrl)
+        /// <param name="cache">
+        /// Optional disk cache consulted by <see cref="GetMeshDataAsync"/> and
+        /// <see cref="GetMeshDataBatchAsync"/> only. Null (the default) means those two methods
+        /// behave exactly like <see cref="GetMeshAsync"/> and <see cref="GetMeshBatchAsync"/>
+        /// always have: every call goes to the network.
+        /// </param>
+        public TerritoryClient(string baseUrl, MeshDiskCache cache = null)
         {
             if (string.IsNullOrWhiteSpace(baseUrl))
             {
@@ -46,6 +57,7 @@ namespace TerritoryKit.Unity
             }
 
             _baseUrl = baseUrl.TrimEnd('/');
+            _cache = cache;
         }
 
         /// <summary>Seconds before a request is abandoned. Zero means no timeout.</summary>
@@ -238,6 +250,264 @@ namespace TerritoryKit.Unity
             {
                 payload.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Downloads and decodes one TKMS mesh without creating a Unity <see cref="Mesh"/>.
+        /// </summary>
+        /// <remarks>
+        /// For pooled callers: unlike <see cref="GetMeshAsync"/>, the caller applies the result
+        /// into a mesh it already owns (<c>MeshDecoder.Apply</c>) and decides when to dispose it
+        /// — typically only once the territory leaves the screen, because the retained
+        /// <see cref="TkmsMeshData.Vertices"/> is what <see cref="TerritoryPicker"/> tests a
+        /// click against. Consults the disk cache passed to the constructor, if any, before the
+        /// network; a cache entry that fails to decode is evicted and treated as a miss rather
+        /// than surfaced as an error.
+        /// </remarks>
+        public async Task<TkmsMeshData> GetMeshDataAsync(string datasetId, string revisionId,
+            string territoryId, string lod, CancellationToken cancellationToken = default)
+        {
+            if (_cache != null &&
+                _cache.TryRead(datasetId, revisionId, territoryId, lod, out byte[] cached))
+            {
+                try
+                {
+                    return await Task.Run(() => DecodeManagedBytes(cached), cancellationToken)
+                        .ConfigureAwait(true);
+                }
+                catch (TkmsFormatException)
+                {
+                    // A torn or otherwise corrupt cache entry. The atomic write in
+                    // MeshDiskCache.Write means this should only happen for a file damaged after
+                    // the fact (disk corruption, manual tampering) -- either way the fix is the
+                    // same as any other cache miss: forget it and go to the network.
+                    _cache.Evict(datasetId, revisionId, territoryId, lod);
+                }
+            }
+
+            string url = _baseUrl
+                + "/v1/datasets/" + Uri.EscapeDataString(datasetId)
+                + "/revisions/" + Uri.EscapeDataString(revisionId)
+                + "/mesh/" + Uri.EscapeDataString(territoryId)
+                + "?lod=" + Uri.EscapeDataString(lod);
+
+            NativeArray<byte> payload = await GetBytesAsync(url, cancellationToken).ConfigureAwait(true);
+            try
+            {
+                (TkmsMeshData Data, byte[] Raw) decoded = await Task.Run(
+                    () => DecodeAndMaybeCopy(payload, _cache != null), cancellationToken)
+                    .ConfigureAwait(true);
+
+                if (_cache != null && decoded.Raw != null)
+                {
+                    WriteToCacheFireAndForget(datasetId, revisionId, territoryId, lod, decoded.Raw);
+                }
+
+                return decoded.Data;
+            }
+            finally
+            {
+                payload.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Downloads and decodes several TKMS meshes without creating Unity meshes, splitting
+        /// the request between the disk cache and the network.
+        /// </summary>
+        /// <remarks>
+        /// Ids already on disk are decoded straight from there; everything else goes into one
+        /// TKMB batch request, same as <see cref="GetMeshBatchAsync"/>, and each entry that
+        /// comes back is written to the cache so the next time any of these ids is asked for —
+        /// individually or in another batch — it is a cache hit.
+        /// </remarks>
+        public async Task<Dictionary<string, TkmsMeshData>> GetMeshDataBatchAsync(string datasetId,
+            string revisionId, IReadOnlyList<string> territoryIds, string lod,
+            List<string> missing = null, CancellationToken cancellationToken = default)
+        {
+            if (territoryIds == null) throw new ArgumentNullException(nameof(territoryIds));
+
+            var result = new Dictionary<string, TkmsMeshData>(territoryIds.Count);
+            var toFetch = new List<string>(territoryIds.Count);
+
+            try
+            {
+                foreach (string id in territoryIds)
+                {
+                    if (_cache != null &&
+                        _cache.TryRead(datasetId, revisionId, id, lod, out byte[] cached))
+                    {
+                        try
+                        {
+                            result[id] = await Task.Run(() => DecodeManagedBytes(cached),
+                                cancellationToken).ConfigureAwait(true);
+                            continue;
+                        }
+                        catch (TkmsFormatException)
+                        {
+                            _cache.Evict(datasetId, revisionId, id, lod);
+                        }
+                    }
+
+                    toFetch.Add(id);
+                }
+
+                if (toFetch.Count == 0)
+                {
+                    return result;
+                }
+
+                string url = _baseUrl
+                    + "/v1/datasets/" + Uri.EscapeDataString(datasetId)
+                    + "/revisions/" + Uri.EscapeDataString(revisionId)
+                    + "/mesh/batch";
+
+                var body = new StringBuilder("{\"territoryIds\":[");
+                for (int i = 0; i < toFetch.Count; i++)
+                {
+                    if (i > 0) body.Append(',');
+                    body.Append('"').Append(EscapeJsonString(toFetch[i])).Append('"');
+                }
+
+                body.Append("],\"lod\":\"").Append(EscapeJsonString(lod))
+                    .Append("\",\"entryEncoding\":\"identity\"}");
+
+                NativeArray<byte> payload = await PostForBytesAsync(url, body.ToString(),
+                    cancellationToken).ConfigureAwait(true);
+                try
+                {
+                    CachableBatch decoded = await Task.Run(
+                        () => DecodeBatchRetainingRawBytes(payload, missing != null, _cache != null),
+                        cancellationToken).ConfigureAwait(true);
+
+                    foreach (KeyValuePair<string, TkmsMeshData> pair in decoded.Meshes)
+                    {
+                        result[pair.Key] = pair.Value;
+                    }
+
+                    if (_cache != null)
+                    {
+                        foreach (KeyValuePair<string, byte[]> pair in decoded.RawBytes)
+                        {
+                            WriteToCacheFireAndForget(datasetId, revisionId, pair.Key, lod, pair.Value);
+                        }
+                    }
+
+                    if (missing != null)
+                    {
+                        missing.Clear();
+                        missing.AddRange(decoded.Missing);
+                    }
+                }
+                finally
+                {
+                    payload.Dispose();
+                }
+
+                return result;
+            }
+            catch
+            {
+                foreach (TkmsMeshData data in result.Values)
+                {
+                    data.Dispose();
+                }
+
+                throw;
+            }
+        }
+
+        private static TkmsMeshData DecodeManagedBytes(byte[] bytes)
+        {
+            var native = new NativeArray<byte>(bytes, Allocator.Persistent);
+            try
+            {
+                return MeshDecoder.Decode(native);
+            }
+            finally
+            {
+                native.Dispose();
+            }
+        }
+
+        /// <summary>Runs on a worker thread: decode, and — only if a cache is configured — one copy out for it.</summary>
+        private static (TkmsMeshData Data, byte[] Raw) DecodeAndMaybeCopy(NativeArray<byte> payload,
+            bool wantRawCopy)
+        {
+            TkmsMeshData data = MeshDecoder.Decode(payload);
+            byte[] raw = wantRawCopy ? payload.ToArray() : null;
+            return (data, raw);
+        }
+
+        private sealed class CachableBatch
+        {
+            public Dictionary<string, TkmsMeshData> Meshes;
+            public Dictionary<string, byte[]> RawBytes;
+            public List<string> Missing;
+        }
+
+        /// <summary>
+        /// Runs on a worker thread: container parse, one decode per entry, and — only if a cache
+        /// is configured — one raw-bytes copy per entry so a batch response can seed the disk
+        /// cache the same way a single-mesh response does.
+        /// </summary>
+        private static CachableBatch DecodeBatchRetainingRawBytes(NativeArray<byte> payload,
+            bool wantMissing, bool wantRawCopies)
+        {
+            TkmbContainer.Toc toc = TkmbContainer.ReadToc(payload);
+            var meshes = new Dictionary<string, TkmsMeshData>(toc.Entries.Count);
+            var raw = new Dictionary<string, byte[]>(wantRawCopies ? toc.Entries.Count : 0);
+            try
+            {
+                foreach (TkmbEntry entry in toc.Entries)
+                {
+                    NativeArray<byte> slice = payload.GetSubArray(entry.Offset, entry.Length);
+                    meshes[entry.TerritoryId] = MeshDecoder.Decode(slice);
+                    if (wantRawCopies)
+                    {
+                        raw[entry.TerritoryId] = slice.ToArray();
+                    }
+                }
+            }
+            catch
+            {
+                foreach (TkmsMeshData data in meshes.Values)
+                {
+                    data.Dispose();
+                }
+
+                throw;
+            }
+
+            return new CachableBatch
+            {
+                Meshes = meshes,
+                RawBytes = raw,
+                Missing = wantMissing ? toc.Missing : new List<string>()
+            };
+        }
+
+        /// <summary>
+        /// Writes a cache entry off the main thread without making the caller wait on disk I/O.
+        /// A write failure is a logged warning, never an exception the caller sees — the mesh it
+        /// asked for already downloaded and decoded successfully; only the *next* load benefiting
+        /// from the cache is at stake.
+        /// </summary>
+        private void WriteToCacheFireAndForget(string datasetId, string revisionId,
+            string territoryId, string lod, byte[] bytes)
+        {
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    _cache.Write(datasetId, revisionId, territoryId, lod, bytes);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("[TerritoryKit] failed to write disk cache entry for '" +
+                                      territoryId + "': " + exception.Message);
+                }
+            });
         }
 
         private sealed class DecodedBatch
