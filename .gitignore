@@ -18,6 +18,9 @@ htmlcov/
 [Bb]uild/
 [Bb]uilds/
 [Ll]ogs/
+UserSettings/
+# Package Manager window state; churns on UI interaction, says nothing about the build
+PackageManagerSettings.asset
 *.csproj
 *.sln
 *.user
@@ -40,3 +43,6 @@ scripts/data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity dev harness: samples are copied in from the package, not authored here
+unity/TerritoryKitDev/Assets/Samples/

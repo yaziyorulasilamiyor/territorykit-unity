@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "displayName": "TerritoryKit Unity",
   "description": "Unity renderer for TerritoryKit region meshes: download, decode, pool, and stream by viewport.",
-  "unity": "2022.3",
-  "license": "MIT"
+  "unity": "6000.1",
+  "license": "MIT",
+  "samples": [
+    {
+      "displayName": "Basic Map",
+      "description": "Loads a published dataset and draws every territory with a top-down orthographic camera.",
+      "path": "Samples~/BasicMap"
+    }
+  ]
 }
