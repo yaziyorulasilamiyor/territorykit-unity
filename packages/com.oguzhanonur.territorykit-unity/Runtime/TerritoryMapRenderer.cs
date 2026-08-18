@@ -102,6 +102,13 @@ namespace TerritoryKit.Unity
             set => loadOnStart = value;
         }
 
+        /// <summary>
+        /// Test seam: invoked after the batch returns and before ownership of its meshes passes
+        /// to <see cref="Draw"/>. Exists so a test can cancel in exactly that window, which is
+        /// otherwise only reachable by racing the decode.
+        /// </summary>
+        internal Action AfterBatchObserver { get; set; }
+
         private async void Start()
         {
             if (!loadOnStart)
@@ -173,8 +180,32 @@ namespace TerritoryKit.Unity
             Dictionary<string, Mesh> meshes = await client.GetMeshBatchAsync(
                 datasetId, Dataset.revisionId, ids, lod, MissingIds, token).ConfigureAwait(true);
 
-            token.ThrowIfCancellationRequested();
-            Draw(meshes);
+            AfterBatchObserver?.Invoke();
+
+            // The meshes exist now but nothing owns them yet, and Task.Run does not stop once
+            // it has started -- so a cancellation raised any time after the download (OnDestroy,
+            // or a second LoadAsync) lands here, past the point where the meshes were created.
+            // Until Draw has taken them, this method is what has to destroy them.
+            bool owned = false;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                Draw(meshes);
+                owned = true;
+            }
+            finally
+            {
+                if (!owned)
+                {
+                    foreach (Mesh mesh in meshes.Values)
+                    {
+                        if (mesh != null)
+                        {
+                            DestroyObject(mesh);
+                        }
+                    }
+                }
+            }
 
             if (frameCameraOnLoad)
             {
@@ -208,26 +239,36 @@ namespace TerritoryKit.Unity
             var ids = new List<string>(meshes.Keys);
             ids.Sort(StringComparer.Ordinal);
 
-            foreach (string id in ids)
+            try
             {
-                Mesh mesh = meshes[id];
-                var go = new GameObject(id);
-                go.transform.SetParent(MapRoot, false);
+                foreach (string id in ids)
+                {
+                    Mesh mesh = meshes[id];
+                    var go = new GameObject(id);
+                    go.transform.SetParent(MapRoot, false);
 
-                go.AddComponent<MeshFilter>().sharedMesh = mesh;
-                var renderer = go.AddComponent<MeshRenderer>();
-                renderer.sharedMaterial = _material;
+                    go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                    var renderer = go.AddComponent<MeshRenderer>();
+                    renderer.sharedMaterial = _material;
 
-                block.Clear();
-                Color colour = NextColour(random);
-                // Built-in unlit reads _Color, URP unlit reads _BaseColor. Setting both costs
-                // nothing and means the sample is not pipeline-specific.
-                block.SetColor(ColourProperty, colour);
-                block.SetColor(BaseColourProperty, colour);
-                renderer.SetPropertyBlock(block);
+                    block.Clear();
+                    Color colour = NextColour(random);
+                    // Built-in unlit reads _Color, URP unlit reads _BaseColor. Setting both
+                    // costs nothing and means the sample is not pipeline-specific.
+                    block.SetColor(ColourProperty, colour);
+                    block.SetColor(BaseColourProperty, colour);
+                    renderer.SetPropertyBlock(block);
 
-                _territoryObjects.Add(go);
-                _meshes.Add(mesh);
+                    _territoryObjects.Add(go);
+                    _meshes.Add(mesh);
+                }
+            }
+            catch
+            {
+                // Half a map is not a state anything downstream expects. Drop what was built so
+                // the caller's cleanup only has the meshes this never reached to deal with.
+                Clear();
+                throw;
             }
         }
 
