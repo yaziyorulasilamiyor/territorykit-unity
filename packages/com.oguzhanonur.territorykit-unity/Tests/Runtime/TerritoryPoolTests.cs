@@ -1,3 +1,4 @@
+using System;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -27,8 +28,8 @@ namespace TerritoryKit.Unity.Tests
         public void TearDown()
         {
             _pool?.DestroyAll();
-            if (_parentObject != null) Object.DestroyImmediate(_parentObject);
-            if (_material != null) Object.DestroyImmediate(_material);
+            if (_parentObject != null) UnityEngine.Object.DestroyImmediate(_parentObject);
+            if (_material != null) UnityEngine.Object.DestroyImmediate(_material);
         }
 
         [Test]
@@ -117,6 +118,57 @@ namespace TerritoryKit.Unity.Tests
             Assert.IsNull(pooled.MeshFilter.sharedMesh,
                 "a pooled-but-idle GameObject must not keep pointing at a Mesh that a later " +
                 "checkout is free to hand to a different territory and mutate");
+        }
+
+        // A gate, not just a measurement: "GC alloc ~= 0" cannot be asserted on its own, so this
+        // pins a concrete per-iteration byte budget instead -- exceed it and the test goes red.
+        // Measured at exactly 0 bytes/iteration over 500 steady-state cycles (Unity 6000.1.1f1,
+        // Windows Editor): PooledTerritory/VisibleTerritory are readonly structs (no `new` per
+        // checkout), Stack<T>.Push/Pop of a reference type does not allocate, and
+        // GameObject.GetComponent<T>() is allocation-free on this Unity version. There is no
+        // async/await and no closure anywhere on Checkout()/Release(), which is usually where an
+        // "almost zero" GC budget actually goes on a hot path like this one -- there is simply
+        // nothing here that would allocate. The budget is left at the measured value rather than
+        // padded with slack, so a future change that reintroduces an allocation here fails this
+        // test instead of quietly raising the number a padded gate would have hidden.
+        private const long BudgetBytesPerIteration = 0;
+
+        [Test]
+        public void SteadyStateCheckoutReleaseStaysWithinAFixedManagedByteBudget()
+        {
+            _pool.WarmUp(8);
+
+            // Let JIT warm-up, first-call component-type caches, etc. settle before measuring --
+            // none of that is "steady state" and none of it should be charged to the budget.
+            for (int i = 0; i < 50; i++)
+            {
+                PooledTerritory warm = _pool.Checkout("warm");
+                _pool.Release(warm);
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            const int iterations = 500;
+            for (int i = 0; i < iterations; i++)
+            {
+                PooledTerritory pooled = _pool.Checkout("x");
+                _pool.Release(pooled);
+            }
+
+            long totalBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            double perIteration = totalBytes / (double)iterations;
+
+            TestContext.Out.WriteLine(
+                $"pool checkout/release: {totalBytes} bytes over {iterations} iterations " +
+                $"= {perIteration:F2} bytes/iteration");
+
+            Assert.LessOrEqual(perIteration, BudgetBytesPerIteration,
+                $"steady-state checkout/release allocated {perIteration:F2} bytes/iteration " +
+                $"({totalBytes} bytes over {iterations} iterations); budget is " +
+                $"{BudgetBytesPerIteration}");
         }
     }
 }
