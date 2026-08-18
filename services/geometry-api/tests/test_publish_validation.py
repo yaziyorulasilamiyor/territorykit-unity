@@ -13,7 +13,7 @@ from pathlib import Path
 
 import publish_dataset
 import pytest
-from publish_fixtures import write_healthy_build
+from publish_fixtures import write_healthy_build, write_healthy_build_with_territories
 
 
 def _assert_nothing_published(artifacts_dir: Path, dataset_id: str) -> None:
@@ -81,7 +81,7 @@ def test_a_report_that_does_not_match_its_own_index_json_is_rejected(tmp_path: P
     manifest["totals"]["vertices"] += 1
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
-    with pytest.raises(publish_dataset.PublishError, match="does not match the index.json"):
+    with pytest.raises(publish_dataset.PublishError, match="does not match the staged index"):
         publish_dataset.publish(build_dir, "fixture", tmp_path / "artifacts")
 
     _assert_nothing_published(tmp_path / "artifacts", "fixture")
@@ -94,6 +94,50 @@ def test_a_missing_lod_report_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(publish_dataset.PublishError, match="lod-report.json"):
         publish_dataset.publish(build_dir, "fixture", tmp_path / "artifacts")
+
+
+# ---- manifest <-> mesh cross-check (W1): check() and check_report_matches_build() never open
+# a single .tkms file, so neither can catch a manifest pointing at a missing or swapped mesh. ----
+
+
+def test_a_deleted_mesh_file_the_manifest_still_references_is_rejected(tmp_path: Path) -> None:
+    build_dir = tmp_path / "build"
+    write_healthy_build(build_dir)
+    (build_dir / "high" / "T1.tkms").unlink()
+
+    with pytest.raises(publish_dataset.PublishError, match="missing mesh file"):
+        publish_dataset.publish(build_dir, "fixture", tmp_path / "artifacts")
+
+    _assert_nothing_published(tmp_path / "artifacts", "fixture")
+
+
+def test_a_mesh_file_swapped_with_another_territorys_is_rejected(tmp_path: Path) -> None:
+    """The scenario check_report_matches_build() cannot see: totals/flags are untouched, only
+    one territory's bytes on disk are wrong — replaced with a *different*, equally valid
+    territory's mesh (same directory, same naming convention, both individually legitimate
+    files). Only a per-file content check catches this."""
+    build_dir = tmp_path / "build"
+    write_healthy_build_with_territories(build_dir, ("T1", "T2"))
+
+    t1_path = build_dir / "high" / "T1.tkms"
+    t2_path = build_dir / "high" / "T2.tkms"
+    t1_path.write_bytes(t2_path.read_bytes())  # T1's file now holds T2's content
+
+    with pytest.raises(publish_dataset.PublishError, match="does not match the manifest's sha256"):
+        publish_dataset.publish(build_dir, "fixture", tmp_path / "artifacts")
+
+    _assert_nothing_published(tmp_path / "artifacts", "fixture")
+
+
+def test_an_unreferenced_extra_mesh_file_is_rejected(tmp_path: Path) -> None:
+    build_dir = tmp_path / "build"
+    write_healthy_build(build_dir)
+    (build_dir / "high" / "ghost.tkms").write_bytes(b"nobody claims this file")
+
+    with pytest.raises(publish_dataset.PublishError, match="no territory in the manifest"):
+        publish_dataset.publish(build_dir, "fixture", tmp_path / "artifacts")
+
+    _assert_nothing_published(tmp_path / "artifacts", "fixture")
 
 
 def test_a_valid_build_publishes_index_json_unchanged(tmp_path: Path) -> None:

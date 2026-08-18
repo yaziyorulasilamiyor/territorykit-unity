@@ -9,7 +9,7 @@ from typing import Annotated
 import publish_dataset
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from publish_fixtures import write_healthy_build
+from publish_fixtures import bump_territory_content, write_healthy_build
 
 from geometry_api.deps import resolve_pinned_revision, resolve_revision
 from geometry_api.errors import install_error_handlers
@@ -110,7 +110,7 @@ def test_a_pruned_revision_is_410(tmp_path: Path) -> None:
         cache_dir=cache_dir,
         published_at="2026-01-01T00:00:00Z",
     )
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir)
     publish_dataset.publish(
         build_dir,
         "fixture",

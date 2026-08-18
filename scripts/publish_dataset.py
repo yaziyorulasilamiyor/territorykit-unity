@@ -8,18 +8,28 @@ tree the running API serves from. The API process never computes geometry and ne
 manifest at request time; both of those happen exactly once, here, before a revision is allowed
 to exist under ``revisions/`` at all.
 
-**The gate (§1.1).** Two independent checks against ``{build_dir}/lod-report.json``, in order:
+**The gate, and what it runs against (§1.1).** Everything is copied into a staging directory
+*first*; every check below runs against that staged snapshot, never against ``build_dir``
+directly. ``build_dir`` is not this process's to hold still — nothing stops another process from
+rebuilding into it mid-publish — so reading it twice (once to validate, once to copy) would let
+the two reads see different data. Copy once, then only ever look at the copy:
 
-1. ``manifest_validation.check()`` — is the report internally consistent (the same check
+1. ``_verify_copy()`` — did every byte make it into staging unchanged?
+2. ``manifest_validation.check()`` — is the staged report internally consistent (the same check
    ``scripts/check_lod_report.py`` runs in CI)?
-2. ``manifest_validation.check_report_matches_build()`` — does the report actually describe
-   *this* ``build_dir``, or could it be stale / hand-edited relative to the ``index.json`` files
-   about to be published?
+3. ``manifest_validation.check_report_matches_build()`` — does the staged report actually
+   describe the staged ``index.json`` files, or could one be stale relative to the other?
+4. ``_validate_manifest_matches_meshes()`` — for every territory every staged ``index.json``
+   claims: does its ``.tkms`` file exist, is it the declared length, does it hash to the declared
+   ``sha256``? This is the check the first three cannot do: a manifest can be perfectly
+   self-consistent and still point at a deleted file, or at a *different* territory's mesh that
+   happens to already exist on disk (a copy/rename mistake upstream, not a hypothetical — this is
+   exactly the class of bug the checks above cannot see because they never open a `.tkms` file).
 
-Either failing stops the run before a single byte is written under ``artifacts_dir``.
+Any of the four failing stops the run before ``artifacts_dir`` is touched.
 
-**The publish sequence (§3.2).** Copy to a staging directory on the same filesystem, verify the
-copy byte-for-byte against the source, hash the *staging snapshot* (not the source — see
+**The publish sequence (§3.2).** Copy to a staging directory on the same filesystem, validate the
+staged snapshot as above, hash the *staging snapshot* (not ``build_dir`` — see
 ``geometry_api.revisions``) to get the revision id, then ``os.rename`` staging into
 ``revisions/{revisionId}/`` — atomic on a POSIX or NTFS filesystem when source and destination
 share a volume. Only after that succeeds does ``latest-revision.json`` get repointed, and only
@@ -85,8 +95,8 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     os.replace(tmp, path)
 
 
-def _load_report(build_dir: Path) -> dict[str, Any]:
-    report_path = build_dir / "lod-report.json"
+def _load_report(root: Path) -> dict[str, Any]:
+    report_path = root / "lod-report.json"
     if not report_path.exists():
         raise PublishError(
             f"{report_path} does not exist — run scripts/build_lod.py first, "
@@ -99,28 +109,43 @@ def _load_report(build_dir: Path) -> dict[str, Any]:
     return report
 
 
-def _validate_report(report: dict[str, Any], build_dir: Path) -> None:
-    """The fail-closed gate (§1.1). Raises with every failure named, changes nothing."""
+def _validate_report(report: dict[str, Any], staging: Path) -> None:
+    """The fail-closed gate (§1.1), run against the staged snapshot. Raises with every failure
+    named, changes nothing."""
     failures = manifest_validation.check(report)
     if failures:
         raise PublishError(
             "lod-report.json failed validation — refusing to publish:\n  " + "\n  ".join(failures)
         )
-    failures = manifest_validation.check_report_matches_build(report, build_dir)
+    failures = manifest_validation.check_report_matches_build(report, staging)
     if failures:
         raise PublishError(
-            "lod-report.json does not match the index.json files in build_dir — refusing to "
+            "lod-report.json does not match the staged index.json files — refusing to "
             "publish:\n  " + "\n  ".join(failures)
         )
 
 
 def _copy_build_to_staging(build_dir: Path, staging: Path) -> None:
-    """Copy every mesh + manifest into staging, generating the gzip variant and etags alongside.
+    """Copy the report, every mesh and every manifest into staging *before* anything reads them,
+    generating the gzip variant and etags alongside.
 
-    Only ``.tkms`` and ``index.json`` come from ``build_dir``; ``*.tkms.gz`` and ``etags.json``
-    are produced here, once, so the API never compresses at request time (Phase 3 rule: no
-    runtime work that could have been precomputed).
+    Everything this process validates or hashes from here on reads only from ``staging`` — never
+    ``build_dir`` again — so a concurrent rebuild of ``build_dir`` cannot make the checks and the
+    published bytes disagree about what they saw (§1.1).
+
+    Only ``lod-report.json``, ``.tkms`` and ``index.json`` come from ``build_dir``;
+    ``*.tkms.gz`` and ``etags.json`` are produced here, once, so the API never compresses at
+    request time (Phase 3 rule: no runtime work that could have been precomputed).
     """
+    report_path = build_dir / "lod-report.json"
+    if not report_path.exists():
+        raise PublishError(
+            f"{report_path} does not exist — run scripts/build_lod.py first, "
+            f"then publish its output directory"
+        )
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "lod-report.json").write_bytes(report_path.read_bytes())
+
     for lod in LOD_LEVELS:
         source_dir = build_dir / lod
         if not source_dir.is_dir():
@@ -145,12 +170,19 @@ def _copy_build_to_staging(build_dir: Path, staging: Path) -> None:
 
 
 def _verify_copy(build_dir: Path, staging: Path) -> None:
-    """Prove the staged ``.tkms``/``index.json`` files are byte-for-byte the source's.
+    """Prove the staged ``lod-report.json``/``.tkms``/``index.json`` files are byte-for-byte the
+    source's — catches copy corruption, not what the source *meant*, which is what
+    ``_validate_report``/``_validate_manifest_matches_meshes`` check next, on the staged copy.
 
     Does not touch the generated ``*.tkms.gz``/``etags.json`` — those have no source-side
     counterpart to compare against; they are checked for real by the round-trip decode tests on
     ``geometry_api.encoding`` and by the gzip content-coding tests on the mesh route.
     """
+    report_source = (build_dir / "lod-report.json").read_bytes()
+    report_staged = (staging / "lod-report.json").read_bytes()
+    if report_source != report_staged:
+        raise PublishError("lod-report.json: staged copy does not match the source byte-for-byte")
+
     for lod in LOD_LEVELS:
         source_dir = build_dir / lod
         staged_dir = staging / lod
@@ -171,6 +203,73 @@ def _verify_copy(build_dir: Path, staging: Path) -> None:
             if source_bytes != staged_bytes:
                 raise PublishError(
                     f"{lod}/{name}: staged copy does not match the source byte-for-byte"
+                )
+
+
+def _validate_manifest_matches_meshes(staging: Path) -> None:
+    """Prove every territory a staged manifest claims actually has the mesh it claims.
+
+    ``check()`` and ``check_report_matches_build()`` only compare level-wide summary numbers
+    (totals, flags) — neither opens a single ``.tkms`` file. A manifest can be internally
+    consistent, and can agree with the report, while ``territories[i].file`` names a file that
+    was deleted, or that was silently replaced with a *different* territory's mesh (same
+    directory, same filename convention, wrong bytes). Only opening the file and checking its
+    length and content hash against what the manifest itself declares catches that.
+    """
+    for lod in LOD_LEVELS:
+        level_dir = staging / lod
+        manifest = json.loads((level_dir / "index.json").read_text(encoding="utf-8"))
+        territories = manifest.get("territories", [])
+
+        claimed: dict[str, dict[str, Any]] = {}
+        for entry in territories:
+            filename = entry.get("file")
+            if not filename:
+                raise PublishError(f"{lod}: territory {entry.get('id')!r} has no 'file' field")
+            if filename in claimed:
+                raise PublishError(
+                    f"{lod}: territories {claimed[filename].get('id')!r} and "
+                    f"{entry.get('id')!r} both claim mesh file {filename!r}"
+                )
+            claimed[filename] = entry
+
+        on_disk = {path.name for path in level_dir.glob("*.tkms")}
+        missing = sorted(set(claimed) - on_disk)
+        if missing:
+            raise PublishError(f"{lod}: manifest references missing mesh file(s): {missing}")
+        extra = sorted(on_disk - set(claimed))
+        if extra:
+            raise PublishError(
+                f"{lod}: mesh file(s) on disk that no territory in the manifest references: {extra}"
+            )
+
+        for filename, entry in claimed.items():
+            territory_id = entry.get("id")
+            data = (level_dir / filename).read_bytes()
+
+            expected_length = entry.get("byteLength")
+            if not isinstance(expected_length, int):
+                raise PublishError(
+                    f"{lod}/{filename}: manifest has no integer 'byteLength' for territory "
+                    f"{territory_id!r}"
+                )
+            if len(data) != expected_length:
+                raise PublishError(
+                    f"{lod}/{filename}: file is {len(data)} bytes, manifest declares "
+                    f"byteLength={expected_length} for territory {territory_id!r}"
+                )
+
+            expected_hash = entry.get("sha256")
+            if not isinstance(expected_hash, str):
+                raise PublishError(
+                    f"{lod}/{filename}: manifest has no 'sha256' for territory {territory_id!r}"
+                )
+            actual_hash = hashlib.sha256(data).hexdigest()
+            if actual_hash != expected_hash:
+                raise PublishError(
+                    f"{lod}/{filename}: content does not match the manifest's sha256 for "
+                    f"territory {territory_id!r} (got {actual_hash}, expected {expected_hash}) "
+                    f"— the file may have been replaced with a different territory's mesh"
                 )
 
 
@@ -258,14 +357,19 @@ def publish(
         )
     resolved_cache_dir = Path(settings.cache_dir) if cache_dir is None else cache_dir
 
-    report = _load_report(build_dir)
-    _validate_report(report, build_dir)
-
     dataset_root = artifacts_dir / dataset_id
     staging = dataset_root / ".staging" / uuid4().hex
     try:
+        # Copy first, validate only the copy (§1.1) — build_dir is never read again after this
+        # call returns, so a concurrent rebuild of it cannot make what was checked and what gets
+        # published disagree.
         _copy_build_to_staging(build_dir, staging)
         _verify_copy(build_dir, staging)
+
+        report = _load_report(staging)
+        _validate_report(report, staging)
+        _validate_manifest_matches_meshes(staging)
+
         revision_id = compute_revision_id(staging)
         final = dataset_root / "revisions" / revision_id
 

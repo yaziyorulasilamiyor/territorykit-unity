@@ -14,6 +14,7 @@ that looks like a complete build.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -101,6 +102,11 @@ class MeshEntry:
             "partCount": self.part_count,
             "indexFormat": "uint32" if self.uses_uint32_indices else "uint16",
             "byteLength": len(self.payload),
+            # Lets Phase 3's publisher prove the .tkms file it is about to publish is the exact
+            # bytes this manifest describes, not merely the right length — a coincidental length
+            # match between two different territories' meshes would otherwise slip a swapped file
+            # past a byteLength-only check.
+            "sha256": hashlib.sha256(self.payload).hexdigest(),
             "bboxLocal": list(self.bounds_local),
             "lossy": self.is_lossy,
             # Typed events rather than three named counters, so a reader of one territory sees

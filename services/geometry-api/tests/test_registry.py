@@ -12,7 +12,7 @@ from pathlib import Path
 
 import publish_dataset
 import pytest
-from publish_fixtures import write_healthy_build
+from publish_fixtures import bump_territory_content, write_healthy_build
 
 from geometry_api.registry import (
     DatasetNotFoundError,
@@ -92,7 +92,7 @@ def test_a_pruned_revision_is_gone_not_not_found(tmp_path: Path) -> None:
         cache_dir=cache_dir,
         published_at="2026-01-01T00:00:00Z",
     )
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir)
     publish_dataset.publish(
         build_dir,
         "fixture",
@@ -122,7 +122,7 @@ def test_an_old_but_still_retained_revision_is_not_current(tmp_path: Path) -> No
         cache_dir=cache_dir,
         published_at="2026-01-01T00:00:00Z",
     )
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir)
     publish_dataset.publish(
         build_dir,
         "fixture",
@@ -147,7 +147,7 @@ def test_a_new_publish_is_picked_up_without_recreating_the_registry(
     assert registry.resolve("fixture").revision_id == first_id
 
     build_dir = artifacts_dir.parent / "build"
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir)
     second_id = publish_dataset.publish(
         build_dir,
         "fixture",

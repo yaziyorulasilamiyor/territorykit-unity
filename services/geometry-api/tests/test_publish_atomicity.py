@@ -10,7 +10,7 @@ from pathlib import Path
 
 import publish_dataset
 import pytest
-from publish_fixtures import write_healthy_build
+from publish_fixtures import bump_territory_content, write_healthy_build
 
 
 def test_interrupted_during_copy_leaves_no_trace(
@@ -123,7 +123,7 @@ def test_active_lease_defers_pruning(tmp_path: Path) -> None:
     lease_dir.mkdir(parents=True)
     (lease_dir / "in-flight-request.lease").touch()
 
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir, suffix="-v2")
     second_id = publish_dataset.publish(
         build_dir,
         "fixture",
@@ -145,7 +145,7 @@ def test_active_lease_defers_pruning(tmp_path: Path) -> None:
     assert first_id not in pruned_ids
 
     (lease_dir / "in-flight-request.lease").unlink()
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v3")
+    bump_territory_content(build_dir, suffix="-v3")
     publish_dataset.publish(
         build_dir,
         "fixture",
@@ -178,7 +178,7 @@ def test_pruned_revision_is_gone_but_pointer_stays_valid(tmp_path: Path) -> None
     first_id = publish_dataset.publish(
         build_dir, "fixture", artifacts_dir, keep=1, published_at="2026-01-01T00:00:00Z"
     )
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir, suffix="-v2")
     second_id = publish_dataset.publish(
         build_dir, "fixture", artifacts_dir, keep=1, published_at="2026-02-01T00:00:00Z"
     )
