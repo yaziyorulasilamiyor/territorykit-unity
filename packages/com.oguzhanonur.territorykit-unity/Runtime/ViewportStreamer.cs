@@ -79,7 +79,11 @@ namespace TerritoryKit.Unity
         [SerializeField]
         private float mediumToLowRefineAt = 140000f;
 
-        private sealed class VisibleTerritory
+        // A readonly struct: Dictionary<string, VisibleTerritory> then stores it inline in the
+        // dictionary's own entry array instead of as a separate heap object per visible
+        // territory -- panning repeatedly adds and removes entries, so this is on the same
+        // steady-state path TerritoryPool avoids allocating on.
+        private readonly struct VisibleTerritory
         {
             public VisibleTerritory(PooledTerritory slot, TkmsMeshData data)
             {

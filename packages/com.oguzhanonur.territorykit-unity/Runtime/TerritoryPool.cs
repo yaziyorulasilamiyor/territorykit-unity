@@ -13,7 +13,13 @@ namespace TerritoryKit.Unity
     /// end up carrying a different Mesh instance across two checkouts (and vice versa) — nothing
     /// here assumes otherwise.
     /// </remarks>
-    public sealed class PooledTerritory
+    /// <remarks>
+    /// A readonly struct, not a class: <see cref="Checkout"/> is the steady-state hot path this
+    /// package targets zero managed allocation for, and four reference fields wrapped in a class
+    /// would be one <c>new</c> per checkout for no reason — nothing here needs reference
+    /// identity or a mutable lifetime independent of the checkout that produced it.
+    /// </remarks>
+    public readonly struct PooledTerritory
     {
         internal PooledTerritory(GameObject gameObject, MeshFilter meshFilter, MeshRenderer renderer,
             Mesh mesh)
@@ -165,7 +171,11 @@ namespace TerritoryKit.Unity
         /// </remarks>
         public void Release(PooledTerritory pooled)
         {
-            if (pooled == null) throw new ArgumentNullException(nameof(pooled));
+            if (pooled.GameObject == null)
+            {
+                throw new ArgumentException(
+                    "pooled is default(PooledTerritory), not a real checkout", nameof(pooled));
+            }
 
             pooled.Renderer.SetPropertyBlock(null);
             pooled.MeshFilter.sharedMesh = null;
