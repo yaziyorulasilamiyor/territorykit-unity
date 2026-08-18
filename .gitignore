@@ -41,3 +41,6 @@ scripts/data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity dev harness: samples are copied in from the package, not authored here
+unity/TerritoryKitDev/Assets/Samples/
