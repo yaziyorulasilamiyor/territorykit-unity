@@ -52,6 +52,13 @@ namespace TerritoryKit.Unity
         public int TimeoutSeconds { get; set; } = 30;
 
         /// <summary>
+        /// Test seam: invoked immediately before <c>UnityWebRequest.Abort()</c>, on the thread
+        /// that issues it. Exists so a test can assert that aborting never leaves the main
+        /// thread — a claim about threading is not observable from the outside otherwise.
+        /// </summary>
+        internal Action AbortObserver { get; set; }
+
+        /// <summary>
         /// Fetches dataset metadata: origin, local bounds, revision id and the per-level
         /// <c>lossy</c>/<c>topologyChanged</c>/<c>pickingUnsafe</c> flags.
         /// </summary>
@@ -346,29 +353,33 @@ namespace TerritoryKit.Unity
 
             var completion = new TaskCompletionSource<bool>();
             UnityWebRequestAsyncOperation operation = request.SendWebRequest();
+            operation.completed += _ => completion.TrySetResult(true);
 
-            // Abort is what makes cancellation take effect before the response arrives; without
-            // it a cancelled request would still run to completion. Cancel from the main thread.
-            CancellationTokenRegistration registration = cancellationToken.CanBeCanceled
-                ? cancellationToken.Register(() =>
+            if (cancellationToken.CanBeCanceled)
+            {
+                // The token is polled here rather than handled by CancellationToken.Register.
+                // A Register callback runs on whichever thread calls Cancel(), and both
+                // request.isDone and request.Abort() are Unity APIs; awaiting with
+                // ConfigureAwait(true) elsewhere does nothing to move that callback. Calling
+                // Unity from a worker thread is the kind of bug that works until it corrupts
+                // state, so the abort is issued from this loop, which stays on the thread that
+                // started the request. Task.Yield resumes through Unity's synchronization
+                // context, so one iteration costs one frame -- the same frame budget the
+                // request needed anyway.
+                while (!completion.Task.IsCompleted)
                 {
-                    if (!request.isDone)
+                    if (cancellationToken.IsCancellationRequested && !request.isDone)
                     {
+                        // Without this a cancelled request would still run to completion.
+                        AbortObserver?.Invoke();
                         request.Abort();
                     }
-                })
-                : default;
 
-            operation.completed += _ => completion.TrySetResult(true);
-            try
-            {
-                await completion.Task.ConfigureAwait(true);
-            }
-            finally
-            {
-                registration.Dispose();
+                    await Task.Yield();
+                }
             }
 
+            await completion.Task.ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
 
             if (request.result != UnityWebRequest.Result.Success)
