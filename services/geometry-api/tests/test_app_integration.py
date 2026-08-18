@@ -14,7 +14,7 @@ from pathlib import Path
 import publish_dataset
 import pytest
 from fastapi.testclient import TestClient
-from publish_fixtures import write_healthy_build
+from publish_fixtures import bump_territory_content, write_healthy_build
 
 from geometry_api import tkmb
 from geometry_api.config import settings
@@ -170,6 +170,20 @@ def test_mesh_gzip_variant_has_a_different_etag_and_decodes_to_the_same_bytes(
     # the wire bytes themselves are checked separately, against the published .tkms.gz file, in
     # test_mesh_gzip_body_is_the_precomputed_file_not_runtime_compressed.
     assert gzipped.content == b"tkms-fixture-high" == identity.content
+
+
+def test_mesh_gzip_q_zero_is_treated_as_rejected_not_accepted(
+    client: tuple[TestClient, str],
+) -> None:
+    """W3: 'gzip;q=0' means the client explicitly refuses gzip (RFC 9110 §12.5.3) — a naive
+    substring check on the header would serve gzip anyway because 'gzip' still appears in it."""
+    test_client, revision_id = client
+    url = f"/v1/datasets/fixture/revisions/{revision_id}/mesh/T1?lod=high"
+
+    response = test_client.get(url, headers={"Accept-Encoding": "gzip;q=0, identity"})
+
+    assert "Content-Encoding" not in response.headers
+    assert response.content == b"tkms-fixture-high"
 
 
 def test_mesh_gzip_body_is_the_precomputed_file_not_runtime_compressed(
@@ -331,7 +345,7 @@ def test_mesh_revision_gone_is_410_through_the_real_route(
         cache_dir=cache_dir,
         published_at="2026-01-01T00:00:00Z",
     )
-    (build_dir / "high" / "T1.tkms").write_bytes(b"tkms-fixture-high-v2")
+    bump_territory_content(build_dir)
     publish_dataset.publish(
         build_dir,
         "fixture",

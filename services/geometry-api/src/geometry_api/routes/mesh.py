@@ -18,7 +18,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 
-from geometry_api.conditional import etag_matches
+from geometry_api.conditional import accepts_gzip, etag_matches
 from geometry_api.deps import RegistryDep, as_api_error, resolve_pinned_revision
 from geometry_api.registry import RegistryError, ResolvedRevision
 from geometry_api.routes.common import CACHE_CONTROL_IMMUTABLE, validate_lod
@@ -54,7 +54,7 @@ def get_mesh(
     etags = registry.load_etags(resolved, lod)
     filename = entry["file"]
     gzip_name = f"{filename}.gz"
-    use_gzip = "gzip" in accept_encoding.lower() and gzip_name in etags
+    use_gzip = accepts_gzip(accept_encoding) and gzip_name in etags
     serve_name = gzip_name if use_gzip else filename
     etag = etags[serve_name]
 
