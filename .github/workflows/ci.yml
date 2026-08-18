@@ -86,3 +86,38 @@ jobs:
 
       - name: Check the level ladder
         run: python scripts/check_lod_report.py "$RUNNER_TEMP/lod/lod-report.json"
+
+  docker:
+    # Not nested in the geometry-api job: that job's defaults.run.working-directory is
+    # services/geometry-api, which would resolve "./services/geometry-api" below to a path that
+    # does not exist. This job runs at the repo root instead — see docs/phases/FAZ-3-PLAN.md §15.
+    #
+    # Docker Desktop does not run in this project's local dev environment (FAZ-0/1/2-RAPOR.md
+    # Tıkanmalar), so this is the only place the image is proven to actually start and serve
+    # traffic, not just build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t geometry-api:ci ./services/geometry-api
+
+      - name: Run container
+        run: docker run -d --name geometry-api-ci -p 8000:8000 geometry-api:ci
+
+      - name: Wait for health (max 60s)
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          echo "container did not become healthy within 60s" >&2
+          exit 1
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker logs geometry-api-ci
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f geometry-api-ci || true

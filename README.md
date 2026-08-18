@@ -4,7 +4,7 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 [TerritoryKit](https://github.com/mberatkaya/TerritoryKit) açık kaynak geospatial SDK'sının
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
-> Durum: Erken geliştirme (Faz 2 tamamlandı — LOD üretimi). Henüz kullanılabilir bir sürüm yok.
+> Durum: Erken geliştirme (Faz 3 tamamlandı — HTTP API ve cache). Henüz kullanılabilir bir sürüm yok.
 
 ## LOD üretimi (Faz 2)
 

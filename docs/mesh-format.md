@@ -149,7 +149,58 @@ Mesh koordinatları dataset origin'ine göredir ve origin bbox merkezinden hesap
 ±180° boylamını kesen dataset'ler desteklenmez (bkz. [projection.md](projection.md) — parçalar
 milyonlarca metre uzağa düşer). Bölgesel dataset'ler için bilinçli bir sınırdır.
 
-## TKMB — Mesh Batch konteyneri (Faz 3'te kullanılır)
+## TKMB v1 — Mesh Batch konteyneri
 
-`POST /datasets/{id}/mesh/batch` birden çok TKMS mesh'ini tek yanıtta döner. Format Faz 3'te
-tanımlanıp bu dosyaya eklenecektir.
+`POST /v1/datasets/{id}/revisions/{revisionId}/mesh/batch` birden çok TKMS mesh'ini tek yanıtta
+döner. Referans uygulama: `services/geometry-api/src/geometry_api/tkmb.py`
+(`encode_tkmb`/`decode_tkmb`).
+
+### Header — 16 byte, little-endian
+
+| offset | tip | alan |
+|---|---|---|
+| 0 | `char[4]` | magic = `"TKMB"` |
+| 4 | `uint16` | version = 1 |
+| 6 | `uint16` | flags (bit0: 1 ise girdiler gzip'li TKMS, 0 ise ham TKMS) |
+| 8 | `uint32` | foundCount — TOC'taki kayıt sayısı |
+| 12 | `uint32` | missingCount — bulunamayan kayıt sayısı |
+
+### Gövde
+
+```
+TOC          — foundCount kayıt, territoryId'ye göre sözlüksel ARTAN sırada:
+               uint16 idLength, char[idLength] territoryId (UTF-8), uint32 offset, uint32 length
+Missing      — missingCount kayıt, territoryId'ye göre sözlüksel ARTAN sırada:
+               uint16 idLength, char[idLength] territoryId
+Payload      — TOC sırasıyla (yani id'ye göre artan), her territory'nin tam TKMS baytları
+               (flags bit0=1 ise gzip'lenmiş)
+```
+
+**`offset` payload alt-bölümünün başlangıcına göredir**, dosyanın mutlak başlangıcına göre değil —
+yani `header + TOC + missing` bölümünden sonraki ilk bayt `offset = 0` kabul edilir. `offset` ve
+`length` `uint32`'dir (`< 2^32`); bir batch'in toplam payload boyutu bunu aşacaksa istek
+`400 batch_too_large` ile reddedilir, sessizce sarmalanmaz veya kesilmez.
+
+**TOC sırası her zaman id-artan, istek sırası değil.** İstemcinin `territoryIds` alanına hangi
+sırayla yazdığından bağımsız olarak TOC (ve payload'ın kendi sırası) her zaman territoryId'ye göre
+artan sıradadır — `["34","06"]` ve `["06","34"]` istekleri **byte-birebir aynı** TKMB üretir. Bu,
+sunucunun içerik-adresli batch cache anahtarının da isteği sırasız (`sorted(set(...))`) ele
+almasıyla tutarlıdır (`services/geometry-api/src/geometry_api/cache.py`).
+
+**Bulunamayan id'ler konteynerin kendi içindedir, bir HTTP header'ında değil.** İstenip
+bulunamayan territory'ler `Missing` bölümünde, ayrıştırılabilir biçimde taşınır — bir ara
+vekil/proxy bir header'ı düşürse bile bilgi kaybolmaz. Tamamı eksik olsa bile yanıt `200` döner
+(`foundCount: 0`); batch URL'si her zaman geçerlidir, döndürdüğü içerik boş olabilir.
+
+**Yinelenen id.** `territoryIds` içinde aynı id birden çok geçerse sunucu tekilleştirir; TOC'ta tek
+kayıt olarak yer alır, hata değildir.
+
+**`entryEncoding`, HTTP `Accept-Encoding` değildir.** Girdilerin gzip'li olup olmadığı (`flags`
+bit0) `Accept-Encoding` header'ından değil, istek gövdesindeki açık `entryEncoding` alanından
+(`"identity" | "gzip"`, varsayılan `"identity"`) belirlenir — bu header'ın anlamı tüm HTTP mesaj
+gövdesinin content-coding'idir, TKMB'nin iç yapısını seçen özel bir alan değil. TKMB yanıtının
+kendisi `entryEncoding` değerinden bağımsız olarak her zaman `identity` HTTP content-coding'i ile
+gönderilir — `entryEncoding=gzip` seçildiğinde içerik zaten girdi bazında sıkıştırılmıştır,
+üstüne bir de HTTP gzip'i uygulamak çifte sıkıştırma olurdu. Her iki durumda da girdi baytları
+yayınlama zamanında önceden üretilmiş `.tkms`/`.tkms.gz` dosyalarından okunur — istek sırasında
+sıkıştırma **yapılmaz**.

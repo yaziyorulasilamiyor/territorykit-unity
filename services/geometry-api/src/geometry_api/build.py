@@ -14,6 +14,7 @@ that looks like a complete build.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -101,6 +102,11 @@ class MeshEntry:
             "partCount": self.part_count,
             "indexFormat": "uint32" if self.uses_uint32_indices else "uint16",
             "byteLength": len(self.payload),
+            # Lets Phase 3's publisher prove the .tkms file it is about to publish is the exact
+            # bytes this manifest describes, not merely the right length — a coincidental length
+            # match between two different territories' meshes would otherwise slip a swapped file
+            # past a byteLength-only check.
+            "sha256": hashlib.sha256(self.payload).hexdigest(),
             "bboxLocal": list(self.bounds_local),
             "lossy": self.is_lossy,
             # Typed events rather than three named counters, so a reader of one territory sees
@@ -108,6 +114,10 @@ class MeshEntry:
             "lossEvents": [item.as_dict() for item in self.loss.as_events()],
             "repaired": self.territory.repaired,
             "parentId": self.territory.parent_id,
+            # Phase 3's territories filter (docs/api.md, ?administrativeLevel=). Named after the
+            # API field rather than the loader's Python attribute (Territory.level) because this
+            # is the wire contract, not an internal name.
+            "administrativeLevel": self.territory.level,
             "neighborIds": list(self.territory.neighbor_ids),
         }
 
@@ -326,7 +336,21 @@ def write_build(
     ``clean`` removes meshes left by an earlier run so the directory describes exactly one
     build. It only ever deletes files this tool writes — never the directory itself, and never
     anything it did not put there.
+
+    Refuses to write into a path with a ``revisions`` component (Phase 3,
+    ``docs/phases/FAZ-3-PLAN.md`` §3.5b): that name is reserved for
+    ``scripts/publish_dataset.py``'s atomic staging-then-rename output. A build command writing
+    there directly would create an unvalidated, non-atomic directory that looks like a published
+    revision but never went through the fail-closed checks in ``manifest_validation`` or the
+    staging/verify/rename sequence — the exact thing Phase 3's immutability guarantee assumes
+    cannot happen.
     """
+    if "revisions" in output_dir.resolve().parts:
+        raise BuildError(
+            f"refusing to write into {output_dir} — it contains a 'revisions' path component, "
+            f"which is reserved for scripts/publish_dataset.py's atomic publish. Build into a "
+            f"plain directory (e.g. the output of scripts/build_lod.py) and publish it instead."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     if clean:
         for stale in output_dir.glob(f"*{MESH_SUFFIX}"):

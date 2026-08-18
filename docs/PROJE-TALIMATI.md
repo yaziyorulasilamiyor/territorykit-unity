@@ -481,31 +481,37 @@ TerritoryKit CLI çalışmazsa (Node sürümü, submodule pin uyumsuzluğu, buil
 
 > ⚠️ **Mimari kural:** FastAPI **istek başına geometri hesaplamaz.** Mesh'ler Faz 1/2'nin build CLI'ı tarafından önceden üretilir; servis yalnızca manifest, viewport seçimi ve hazır artifact sunar. Bu, quantized-mesh / 3D Tiles / I3S gibi yerleşik geospatial streaming modelleriyle aynı yaklaşımdır. Artifact'lar sürümlü ve değişmez (immutable) olmalı ki CDN ve HTTP cache doğru çalışsın.
 
-**Endpoint'ler**
-- [ ] `GET /health`
-- [ ] `GET /datasets` — mevcut dataset listesi
-- [ ] `GET /datasets/{id}` — metadata: origin, projection, seviye listesi, bölge sayısı, bbox
-- [ ] `GET /datasets/{id}/territories` — bölge listesi: id, ad, parent, bbox, komşular
-- [ ] `GET /datasets/{id}/mesh/{territory_id}?lod=medium` — TKMS binary
-- [ ] `GET /datasets/{id}/viewport?bbox=x1,y1,x2,y2&lod=medium` — görünür bölge id listesi
-- [ ] `POST /datasets/{id}/mesh/batch` — çoklu mesh tek istekte (TKMB konteyner formatı; formatı `docs/mesh-format.md`'ye ekle)
+**Endpoint'ler** (kesin yüzey `docs/api.md`'de; `/health`/`/ready`/`/metrics` kasıtlı olarak
+`/v1` dışında — bkz. `docs/phases/FAZ-3-PLAN.md` §13.0)
+- [x] `GET /health`, `GET /ready`, `GET /metrics`
+- [x] `GET /v1/datasets` — yayınlanmış dataset listesi
+- [x] `GET /v1/datasets/{id}` — metadata: origin, `revisionId`, seviye listesi, bölge sayısı, bbox
+- [x] `GET /v1/datasets/{id}/territories` — cursor sayfalanmış bölge listesi: id, ad, parent, bbox, komşular
+- [x] `GET`/`HEAD /v1/datasets/{id}/revisions/{revisionId}/mesh/{territory_id}?lod=medium` — TKMS binary
+- [x] `GET /v1/datasets/{id}/viewport?bbox=x1,y1,x2,y2&lod=medium` — görünür bölge id listesi
+- [x] `POST /v1/datasets/{id}/revisions/{revisionId}/mesh/batch` — çoklu mesh tek istekte (TKMB konteyner formatı, `docs/mesh-format.md`'de)
 
 **Yapılacaklar**
-- [ ] Disk tabanlı, içerik-adresli cache (aynı girdi → aynı çıktı, bir kez hesapla)
-- [ ] `ETag` + `Cache-Control` başlıkları, `304 Not Modified` desteği
-- [ ] Binary yanıtlarda gzip
-- [ ] Hatalar için tutarlı JSON şeması (`{"error": {"code": ..., "message": ...}}`)
-- [ ] OpenAPI dokümanı anlamlı (açıklamalar, örnekler)
+- [x] Disk tabanlı, içerik-adresli cache (aynı girdi → aynı çıktı, bir kez hesapla)
+- [x] `ETag` + `Cache-Control` başlıkları, `304 Not Modified` desteği
+- [x] Binary yanıtlarda gzip (önceden üretilmiş varyant, madde 9)
+- [x] Hatalar için tutarlı JSON şeması (`{"error": {"code": ..., "message": ...}}`)
+- [x] OpenAPI dokümanı anlamlı (her uç noktada açıklama)
 
 **Testler**
-- [ ] Her endpoint için mutlu yol + hata yolu testi
-- [ ] Cache hit/miss testi
-- [ ] ETag / 304 testi
-- [ ] Viewport doğruluğu: bbox dışındaki bölge dönmüyor, kesişen dönüyor
-- [ ] Basit yük ölçümü: cache hit p95 gecikmesi raporda sayı olarak yazılı
+- [x] Her endpoint için mutlu yol + hata yolu testi
+- [x] Cache hit/miss testi
+- [x] ETag / 304 testi
+- [x] Viewport doğruluğu: bbox dışındaki bölge dönmüyor, kesişen dönüyor
+- [x] Basit yük ölçümü: cache hit p95 gecikmesi raporda sayı olarak yazılı
 
 **Bitti sayılır**
-- `docker compose up` → Swagger'da tüm endpoint'ler denenebiliyor
+- `uvicorn geometry_api.main:app` ile yerel çalıştırma → Swagger'da
+  (`http://localhost:8000/docs`) tüm endpoint'ler denenebiliyor; ayrıca CI'da `docker build` +
+  gerçek konteyner health-check'i başarıyla tamamlanıyor (bkz. `.github/workflows/ci.yml`).
+  Docker Desktop bu geliştirme ortamında Faz 0'dan beri çalışmıyor (bkz. FAZ-0/1/2-RAPOR.md
+  Tıkanmalar) — bitiş kriteri buna bağlı tutulmuyor; karar ve gerekçe
+  `docs/phases/FAZ-3-PLAN.md` §15'te.
 - Testler geçiyor, yük ölçümü raporda var
 
 ---
