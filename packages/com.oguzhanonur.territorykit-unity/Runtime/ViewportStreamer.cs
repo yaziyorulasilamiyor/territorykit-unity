@@ -20,11 +20,11 @@ namespace TerritoryKit.Unity
     /// <para>
     /// <b>Concurrency.</b> At most one <c>/viewport</c> + mesh-batch fetch is ever in flight. A
     /// tick that decides to fetch cancels whatever fetch is still running and starts a new one
-    /// from the camera's current position — the superseded fetch's own cleanup (see
-    /// <see cref="TerritoryClient.GetMeshDataBatchAsync"/>) disposes anything it had already
-    /// decoded. Visible-set bookkeeping (<c>_visible</c>, the pool) is only ever mutated after
-    /// <em>both</em> awaits in one tick succeed, so a cancelled tick leaves no partial state for
-    /// the next tick to untangle.
+    /// from the camera's current position. Cancellation alone does not stop dispatched
+    /// <c>Task.Run</c> work, so each tick also carries a generation number and refuses to write
+    /// anything once a newer tick has started — see <c>_tickGeneration</c>. The commit itself is
+    /// transactional: a tick prepares its new slots in full before handing any of them to
+    /// <c>_visible</c>, and releases everything it took if preparation fails.
     /// </para>
     /// <para>
     /// <b>A LOD change invalidates everything currently visible</b> — a mesh loaded at one level
@@ -114,6 +114,38 @@ namespace TerritoryKit.Unity
         private LocalBounds? _lastRequestedBounds;
         private string _lastRequestedLod;
 
+        /// <summary>
+        /// Incremented every time a tick starts a fetch. A running tick carries the value it was
+        /// started with and refuses to touch any shared state once this has moved past it.
+        /// </summary>
+        /// <remarks>
+        /// The cancellation token alone is not enough. <c>Task.Run</c> work already dispatched
+        /// does not unwind when its token is cancelled, so a superseded tick keeps running to
+        /// completion and arrives at its commit block after a newer tick has already committed —
+        /// at which point it would release territories the newer tick just made visible,
+        /// overwrite newer entries under the same id (leaking the newer slot and mesh data), and
+        /// fire <see cref="TickObserver"/> for a result nobody asked for. Checking the generation
+        /// as well closes that: cancellation is a request to stop, the generation is proof of
+        /// who is allowed to write.
+        /// </remarks>
+        private int _tickGeneration;
+
+        private LodHysteresis.Threshold[] _thresholds;
+        private float _cachedHighToMediumCoarsenAt;
+        private float _cachedHighToMediumRefineAt;
+        private float _cachedMediumToLowCoarsenAt;
+        private float _cachedMediumToLowRefineAt;
+
+        /// <summary>
+        /// Matches the server's <c>batch_max_territories</c> (<c>geometry_api/config.py</c>),
+        /// which answers <c>400 batch_too_large</c> above it. A viewport holding more than this
+        /// many territories — a district- or neighbourhood-level dataset zoomed out — would
+        /// otherwise fail the whole tick on an HTTP error long before memory became the limit.
+        /// The server deduplicates with <c>sorted(set(...))</c> before checking, so chunking by
+        /// distinct id count is the right unit.
+        /// </summary>
+        private const int MaxBatchTerritories = 200;
+
         public string BaseUrl { get => baseUrl; set => baseUrl = value; }
 
         public string DatasetId { get => datasetId; set => datasetId = value; }
@@ -152,6 +184,30 @@ namespace TerritoryKit.Unity
         /// this can trust that when it fires, the visible set actually changed.
         /// </summary>
         internal Action TickObserver { get; set; }
+
+        /// <summary>
+        /// Test seam: invoked after a tick's meshes have been fetched and decoded, and before it
+        /// checks whether it is still allowed to commit them.
+        /// </summary>
+        /// <remarks>
+        /// This is the window the generation guard exists for, and it is not reachable by
+        /// timing. Once <c>Task.Run</c> has started decoding, cancelling the token does not
+        /// unwind it: the decode runs to completion and the await returns a perfectly valid
+        /// dictionary to a tick that is no longer current. Reproducing that by racing a real
+        /// server means landing a cancellation inside a window of a few milliseconds, and a test
+        /// that tries would pass against the broken code most of the time — which is exactly the
+        /// mistake the phase 4 review caught in the cancellation tests.
+        /// </remarks>
+        internal Action AfterFetchObserver { get; set; }
+
+        /// <summary>
+        /// Test seam: bumps the generation as though a newer tick had started, without starting
+        /// one. Lets a test put a running tick into the superseded state deterministically.
+        /// </summary>
+        internal void ForceSupersedeForTests()
+        {
+            _tickGeneration++;
+        }
 
         private async void Start()
         {
@@ -226,16 +282,42 @@ namespace TerritoryKit.Unity
             _inFlightCts?.Cancel();
             _inFlightCts?.Dispose();
             _inFlightCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-            _ = RunTickAsync(paddedBounds, nextLod, _inFlightCts.Token);
+            _ = RunTickAsync(paddedBounds, nextLod, _inFlightCts.Token, ++_tickGeneration);
         }
 
+        /// <summary>
+        /// The thresholds array, rebuilt only when one of the serialized fields behind it has
+        /// actually changed.
+        /// </summary>
+        /// <remarks>
+        /// This is called on every tick, including the overwhelmingly common one where the camera
+        /// has not moved and nothing is fetched. Allocating a fresh two-element array there put
+        /// roughly five allocations a second on an idle scene — small, but exactly the kind of
+        /// steady-state garbage <see cref="TerritoryPool"/> exists to avoid, and it made the
+        /// phase 5 "zero allocation" claim true of the pool while false of the component that
+        /// drives it.
+        /// </remarks>
         private LodHysteresis.Threshold[] BuildThresholds()
         {
-            return new[]
+            if (_thresholds != null &&
+                _cachedHighToMediumCoarsenAt == highToMediumCoarsenAt &&
+                _cachedHighToMediumRefineAt == highToMediumRefineAt &&
+                _cachedMediumToLowCoarsenAt == mediumToLowCoarsenAt &&
+                _cachedMediumToLowRefineAt == mediumToLowRefineAt)
+            {
+                return _thresholds;
+            }
+
+            _cachedHighToMediumCoarsenAt = highToMediumCoarsenAt;
+            _cachedHighToMediumRefineAt = highToMediumRefineAt;
+            _cachedMediumToLowCoarsenAt = mediumToLowCoarsenAt;
+            _cachedMediumToLowRefineAt = mediumToLowRefineAt;
+            _thresholds = new[]
             {
                 new LodHysteresis.Threshold(highToMediumCoarsenAt, highToMediumRefineAt),
                 new LodHysteresis.Threshold(mediumToLowCoarsenAt, mediumToLowRefineAt)
             };
+            return _thresholds;
         }
 
         private static bool Contains(LocalBounds outer, LocalBounds inner)
@@ -253,18 +335,85 @@ namespace TerritoryKit.Unity
         }
 
         /// <summary>
-        /// Fetches the ids for one tick and applies the diff. Mutates <see cref="_visible"/> and
-        /// the pool only after both awaits below succeed — see the threading remarks on the
-        /// class.
+        /// Throws if this tick no longer has the right to write: either its token was cancelled,
+        /// or a newer tick has started and owns the shared state now.
         /// </summary>
-        private async Task RunTickAsync(LocalBounds bounds, string lod, CancellationToken token)
+        private void ThrowIfSuperseded(int generation, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (generation != _tickGeneration)
+            {
+                throw new OperationCanceledException(
+                    "tick " + generation + " was superseded by tick " + _tickGeneration);
+            }
+        }
+
+        /// <summary>
+        /// Fetches every id in <paramref name="ids"/>, in chunks the server will accept, and
+        /// disposes everything it decoded if any chunk fails or the tick is superseded.
+        /// </summary>
+        private async Task<Dictionary<string, TkmsMeshData>> FetchInChunksAsync(List<string> ids,
+            string lod, CancellationToken token, int generation)
+        {
+            var fetched = new Dictionary<string, TkmsMeshData>(ids.Count);
+            try
+            {
+                for (int start = 0; start < ids.Count; start += MaxBatchTerritories)
+                {
+                    int count = Mathf.Min(MaxBatchTerritories, ids.Count - start);
+                    List<string> chunk = ids.GetRange(start, count);
+
+                    Dictionary<string, TkmsMeshData> part = await _client.GetMeshDataBatchAsync(
+                        datasetId, Dataset.revisionId, chunk, lod, null, token).ConfigureAwait(true);
+
+                    // Merged before the next await so a failure later still sees everything
+                    // decoded so far and can dispose it.
+                    foreach (KeyValuePair<string, TkmsMeshData> pair in part)
+                    {
+                        fetched[pair.Key] = pair.Value;
+                    }
+
+                    ThrowIfSuperseded(generation, token);
+                }
+
+                return fetched;
+            }
+            catch
+            {
+                foreach (TkmsMeshData data in fetched.Values)
+                {
+                    data.Dispose();
+                }
+
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Fetches the ids for one tick and applies the diff.
+        /// </summary>
+        /// <remarks>
+        /// Every await is followed by <see cref="ThrowIfSuperseded"/>, and the commit itself is
+        /// transactional: new slots are checked out and filled into a local list first, and only
+        /// a fully prepared set is handed over to <c>_visible</c>. A failure anywhere in
+        /// preparation releases the slots it took and disposes every mesh it decoded, leaving the
+        /// visible set exactly as it was rather than half-updated.
+        /// <para>
+        /// Preparing before releasing means a level change briefly holds two slots per territory
+        /// and can grow the pool to about twice the visible count, once. That is the deliberate
+        /// price of never mutating <c>_visible</c> until the new state is known to be complete;
+        /// releasing first would be cheaper and would leave a hole on the failure path.
+        /// </para>
+        /// </remarks>
+        private async Task RunTickAsync(LocalBounds bounds, string lod, CancellationToken token,
+            int generation)
         {
             try
             {
                 string bboxLocal = FormatBbox(bounds);
                 List<string> newIds = await _client.GetAllViewportIdsAsync(datasetId, lod, bboxLocal, token)
                     .ConfigureAwait(true);
-                token.ThrowIfCancellationRequested();
+                ThrowIfSuperseded(generation, token);
 
                 bool lodChanging = lod != CurrentLod;
                 var newIdSet = new HashSet<string>(newIds);
@@ -287,33 +436,75 @@ namespace TerritoryKit.Unity
                     }
                 }
 
-                Dictionary<string, TkmsMeshData> fetched;
-                if (toAdd.Count > 0)
+                Dictionary<string, TkmsMeshData> fetched = toAdd.Count > 0
+                    ? await FetchInChunksAsync(toAdd, lod, token, generation).ConfigureAwait(true)
+                    : new Dictionary<string, TkmsMeshData>();
+
+                AfterFetchObserver?.Invoke();
+
+                var prepared = new List<KeyValuePair<string, VisibleTerritory>>(fetched.Count);
+                bool handedOver = false;
+                try
                 {
-                    fetched = await _client.GetMeshDataBatchAsync(datasetId, Dataset.revisionId,
-                        toAdd, lod, null, token).ConfigureAwait(true);
+                    // Re-checked immediately before anything is mutated: the last await above may
+                    // have completed on a frame where a newer tick had already started.
+                    ThrowIfSuperseded(generation, token);
+
+                    foreach (KeyValuePair<string, TkmsMeshData> pair in fetched)
+                    {
+                        PooledTerritory slot = _pool.Checkout(pair.Key);
+                        try
+                        {
+                            MeshDecoder.Apply(slot.Mesh, pair.Value);
+                            ApplyColour(slot, ColourFor(pair.Key));
+                        }
+                        catch
+                        {
+                            // This slot never made it into `prepared`, so the finally below will
+                            // not see it; release it here or it is leaked.
+                            _pool.Release(slot);
+                            throw;
+                        }
+
+                        prepared.Add(new KeyValuePair<string, VisibleTerritory>(
+                            pair.Key, new VisibleTerritory(slot, pair.Value)));
+                    }
+
+                    // The commit point. Nothing below can throw, so from here the new state is
+                    // whole: outgoing territories go back to the pool, incoming ones take their
+                    // place, and ownership of every fetched TkmsMeshData passes to _visible.
+                    foreach (string id in toRemove)
+                    {
+                        ReleaseVisible(id);
+                    }
+
+                    foreach (KeyValuePair<string, VisibleTerritory> entry in prepared)
+                    {
+                        _visible[entry.Key] = entry.Value;
+                    }
+
+                    handedOver = true;
+                    CurrentLod = lod;
                 }
-                else
+                finally
                 {
-                    fetched = new Dictionary<string, TkmsMeshData>();
+                    if (!handedOver)
+                    {
+                        foreach (KeyValuePair<string, VisibleTerritory> entry in prepared)
+                        {
+                            _pool.Release(entry.Value.Slot);
+                        }
+
+                        // Covers prepared and unprepared alike: `prepared` holds the same
+                        // TkmsMeshData instances as `fetched`, so this is the one place they are
+                        // disposed and it cannot double-dispose.
+                        foreach (TkmsMeshData data in fetched.Values)
+                        {
+                            data.Dispose();
+                        }
+                    }
                 }
 
-                // No more awaits from here on: a cancellation could only have landed in one of
-                // the two calls above, before anything below ran.
-                foreach (string id in toRemove)
-                {
-                    ReleaseVisible(id);
-                }
-
-                foreach (KeyValuePair<string, TkmsMeshData> pair in fetched)
-                {
-                    PooledTerritory slot = _pool.Checkout(pair.Key);
-                    MeshDecoder.Apply(slot.Mesh, pair.Value);
-                    ApplyColour(slot, ColourFor(pair.Key));
-                    _visible[pair.Key] = new VisibleTerritory(slot, pair.Value);
-                }
-
-                CurrentLod = lod;
                 // Fired only here, on genuine completion -- not from a catch/finally that also
                 // runs when this tick was cancelled. A superseded tick has nothing to report, and
                 // notifying for it anyway would let a caller (a test, in practice) observe a
@@ -323,7 +514,9 @@ namespace TerritoryKit.Unity
             catch (OperationCanceledException)
             {
                 // Superseded by a later tick, which will recompute from the camera's current
-                // position -- _visible was never touched, so there is nothing to undo.
+                // position, or the component is shutting down. Either way _visible was never
+                // touched and the newer tick already owns _lastRequestedBounds/_lastRequestedLod,
+                // so there is deliberately no rollback here.
             }
             catch (Exception exception)
             {
@@ -331,7 +524,35 @@ namespace TerritoryKit.Unity
                 // an uncaught exception here would otherwise become an unobserved task fault that
                 // silently stops ticking rather than telling anyone why.
                 Debug.LogException(exception, this);
+                RollBackRequestState(generation);
             }
+        }
+
+        /// <summary>
+        /// Forgets what the failed tick had recorded as requested, so the next tick re-requests
+        /// the same view instead of treating it as already covered.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Tick"/> writes <c>_lastRequestedBounds</c> before the fetch starts, and
+        /// then skips any later tick whose camera box is still inside it. If the fetch fails —
+        /// server down, a transient network error, a malformed payload — nothing ever clears that
+        /// record, so the streamer stops issuing requests entirely and only wakes up if the user
+        /// happens to pan far enough to leave the box. A failed request has covered nothing, so
+        /// the record it left has to go with it.
+        /// <para>
+        /// Guarded by generation: if a newer tick has already started, these fields describe
+        /// <em>its</em> request, and clearing them would make it re-fetch needlessly.
+        /// </para>
+        /// </remarks>
+        private void RollBackRequestState(int generation)
+        {
+            if (generation != _tickGeneration)
+            {
+                return;
+            }
+
+            _lastRequestedBounds = null;
+            _lastRequestedLod = null;
         }
 
         private void ReleaseVisible(string id)

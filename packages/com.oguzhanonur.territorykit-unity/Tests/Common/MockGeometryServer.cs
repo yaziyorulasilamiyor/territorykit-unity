@@ -67,6 +67,21 @@ namespace TerritoryKit.Unity.Tests
 
         public string ForcedBody { get; set; }
 
+        /// <summary>
+        /// Mirrors the real server's <c>batch_max_territories</c> (200 in
+        /// <c>geometry_api/config.py</c>): a batch asking for more distinct ids than this is
+        /// answered <c>400 batch_too_large</c> rather than served.
+        /// </summary>
+        /// <remarks>
+        /// Enforced here so a client that fails to chunk actually fails the test. Without it a
+        /// mock that happily serves any number of ids would pass whether or not the client
+        /// respects the contract the real server enforces.
+        /// </remarks>
+        public int MaxBatchTerritories { get; set; } = 200;
+
+        /// <summary>Distinct-id count of every batch request received, in order.</summary>
+        public List<int> BatchSizes { get; } = new List<int>();
+
         /// <summary>Seconds to stall every response by, for cancellation tests.</summary>
         public double DelaySeconds { get; set; }
 
@@ -211,6 +226,28 @@ namespace TerritoryKit.Unity.Tests
                         requested.Add(id);
                     }
                 }
+            }
+
+            var distinct = new List<string>();
+            foreach (string id in requested)
+            {
+                if (!distinct.Contains(id))
+                {
+                    distinct.Add(id);
+                }
+            }
+
+            lock (BatchSizes)
+            {
+                BatchSizes.Add(distinct.Count);
+            }
+
+            if (distinct.Count > MaxBatchTerritories)
+            {
+                WriteJson(context, 400,
+                    "{\"error\":{\"code\":\"batch_too_large\",\"message\":\"" + distinct.Count +
+                    " territoryIds requested, over the " + MaxBatchTerritories + " limit\"}}");
+                return;
             }
 
             var found = new Dictionary<string, byte[]>();

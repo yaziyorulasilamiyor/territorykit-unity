@@ -265,5 +265,211 @@ namespace TerritoryKit.Unity.Tests
             Assert.AreEqual("a", id);
             Assert.AreEqual("high", safety.Lod);
         }
+
+        // ---- superseded ticks, failure recovery, batch chunking ----------------------------
+
+        /// <summary>
+        /// The accounting that has to balance no matter how the ticks interleave: every
+        /// GameObject the pool ever made is either sitting free or checked out by exactly one
+        /// visible territory.
+        /// </summary>
+        private static void AssertPoolAccountingBalances(ViewportStreamer streamer, string when)
+        {
+            TerritoryPoolStats stats = streamer.PoolStats;
+            Assert.AreEqual(stats.TotalGameObjectsCreated,
+                stats.FreeGameObjects + streamer.VisibleCount,
+                when + ": every pooled GameObject must be either free or held by one visible " +
+                "territory -- a leaked slot or a double release shows up here");
+            Assert.AreEqual(stats.TotalMeshesCreated, stats.FreeMeshes + streamer.VisibleCount,
+                when + ": same for meshes");
+        }
+
+        [UnityTest]
+        public IEnumerator ATickSupersededAfterItsFetchCommitsNothing()
+        {
+            // The window the generation guard exists for, entered deterministically rather than
+            // by racing: once Task.Run has started decoding, cancelling the token does not unwind
+            // it, so the decode finishes and the await hands a perfectly valid dictionary back to
+            // a tick that is no longer current. Before the fix there was no check at all between
+            // the mesh batch returning and the commit, so that tick committed -- releasing
+            // territories the newer tick had just made visible, overwriting newer entries under
+            // the same id (leaking both the slot and the mesh data), and firing TickObserver for
+            // a result nobody asked for.
+            //
+            // A timing-based version of this test passes against the broken code, because the
+            // client's own cancellation handling catches the far more common network-path case
+            // first. That was measured, not assumed: with the guards removed and supersession
+            // driven by camera movement plus a slow server, the test still went green.
+            _server.Meshes["a"] = Tile(0f, 0f, 100f, 100f);
+            _server.ViewportPages.Add(@"{""territoryIds"":[""a""],""nextCursor"":""""}");
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            bool tickObserverFired = false;
+            streamer.TickObserver = () => tickObserverFired = true;
+            // Fires after the meshes are fetched and decoded, before the tick asks whether it may
+            // still commit them -- exactly where a real supersession lands.
+            streamer.AfterFetchObserver = () => streamer.ForceSupersedeForTests();
+
+            TerritoryMapPlacement.FrameBounds(_camera, 0f, 0f, 100f, 100f, padding: 1f);
+
+            float deadline = Time.realtimeSinceStartup + 5f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            Assert.AreEqual(0, streamer.VisibleCount,
+                "a tick that lost its claim between fetching and committing must commit nothing");
+            Assert.IsFalse(tickObserverFired,
+                "and must not report a completion it did not perform");
+            AssertPoolAccountingBalances(streamer, "after a superseded tick was discarded");
+        }
+
+        [UnityTest]
+        public IEnumerator OverlappingTicksLeaveConsistentStateAndTheLastRequestedView()
+        {
+            // The integration counterpart to the test above: real supersession, driven by moving
+            // the camera faster than the server answers, ending in exactly the last view asked
+            // for with the pool fully accounted for.
+            for (int i = 0; i < 6; i++)
+            {
+                _server.Meshes["t" + i] = Tile(i * 100f, 0f, i * 100f + 100f, 100f);
+            }
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            _server.DelaySeconds = 0.25;
+
+            for (int i = 0; i < 6; i++)
+            {
+                _server.ViewportPages.Clear();
+                _server.ViewportPages.Add(@"{""territoryIds"":[""t" + i + @"""],""nextCursor"":""""}");
+                TerritoryMapPlacement.FrameBounds(_camera, i * 100f, 0f, i * 100f + 100f, 100f, padding: 1f);
+
+                // Long enough for a tick to start, far too short for one to finish.
+                float until = Time.realtimeSinceStartup + 0.05f;
+                while (Time.realtimeSinceStartup < until)
+                {
+                    yield return null;
+                }
+            }
+
+            // Let every straggler land, including the ones cancelled mid-flight.
+            _server.DelaySeconds = 0;
+            float deadline = Time.realtimeSinceStartup + 8f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            AssertPoolAccountingBalances(streamer, "after six overlapping ticks");
+            Assert.AreEqual(1, streamer.VisibleCount,
+                "the last camera position shows exactly one territory; a stale tick that " +
+                "committed would leave more or fewer");
+            Assert.IsTrue(streamer.TryPick(
+                new Vector2(_camera.pixelWidth / 2f, _camera.pixelHeight / 2f), out string id, out _));
+            Assert.AreEqual("t5", id, "the visible territory must be the last one requested");
+        }
+
+        [UnityTest]
+        public IEnumerator AFailedRequestIsRetriedWithoutWaitingForTheCameraToMove()
+        {
+            // Tick() records the box it requested before the fetch starts and skips any later
+            // tick still inside it. Nothing used to clear that record when the fetch failed, so a
+            // single server error made the streamer go permanently silent at that camera
+            // position -- it would only wake up if the user happened to pan far enough to leave
+            // the box.
+            LogAssert.ignoreFailingMessages = true; // the failing tick logs the exception, by design
+            try
+            {
+                _server.Meshes["a"] = Tile(0f, 0f, 100f, 100f);
+                _server.ViewportPages.Add(@"{""territoryIds"":[""a""],""nextCursor"":""""}");
+
+                var streamer = CreateStreamer();
+                yield return WaitForDataset(streamer);
+
+                _server.ForcedStatus = 500;
+                _server.ForcedBody = @"{""error"":{""code"":""internal"",""message"":""boom""}}";
+                TerritoryMapPlacement.FrameBounds(_camera, 0f, 0f, 100f, 100f, padding: 1f);
+
+                int requestsBefore = 0;
+                float failDeadline = Time.realtimeSinceStartup + 5f;
+                while (Time.realtimeSinceStartup < failDeadline)
+                {
+                    lock (_server.Requests)
+                    {
+                        requestsBefore = _server.Requests.Count;
+                    }
+
+                    if (requestsBefore > 1)
+                    {
+                        break;
+                    }
+
+                    yield return null;
+                }
+
+                Assert.Greater(requestsBefore, 1, "the failing request should have been attempted");
+                Assert.AreEqual(0, streamer.VisibleCount, "nothing should be visible after a failure");
+
+                // Recover the server but leave the camera exactly where it is.
+                _server.ForcedStatus = 0;
+                _server.ForcedBody = null;
+
+                yield return WaitForTick(streamer);
+
+                Assert.AreEqual(1, streamer.VisibleCount,
+                    "the streamer must re-request the same view once the server recovers, " +
+                    "rather than waiting for the camera to move");
+                AssertPoolAccountingBalances(streamer, "after recovering from a failed request");
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = false;
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator AViewportWithMoreIdsThanTheBatchLimitIsFetchedInChunks()
+        {
+            // The real server answers 400 batch_too_large above 200 distinct ids
+            // (geometry_api/config.py), and MockGeometryServer enforces the same limit -- so an
+            // unchunked client fails this outright rather than merely being impolite.
+            const int territoryCount = 250;
+            var ids = new System.Text.StringBuilder();
+            for (int i = 0; i < territoryCount; i++)
+            {
+                string id = "t" + i.ToString("D3");
+                _server.Meshes[id] = Tile(i * 10f, 0f, i * 10f + 8f, 100f);
+                if (i > 0) ids.Append(',');
+                ids.Append('"').Append(id).Append('"');
+            }
+
+            _server.ViewportPages.Add(@"{""territoryIds"":[" + ids + @"],""nextCursor"":""""}");
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            TerritoryMapPlacement.FrameBounds(_camera, 0f, 0f, territoryCount * 10f, 100f, padding: 1f);
+            yield return WaitForTick(streamer);
+
+            Assert.AreEqual(territoryCount, streamer.VisibleCount,
+                "every territory in the viewport must end up loaded, across however many batches");
+
+            lock (_server.BatchSizes)
+            {
+                Assert.Greater(_server.BatchSizes.Count, 1, "250 ids cannot be one batch");
+                foreach (int size in _server.BatchSizes)
+                {
+                    Assert.LessOrEqual(size, _server.MaxBatchTerritories,
+                        "every batch must respect the server's limit");
+                }
+            }
+
+            AssertPoolAccountingBalances(streamer, "after a chunked fetch");
+        }
     }
 }
