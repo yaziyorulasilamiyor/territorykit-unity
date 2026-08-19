@@ -96,6 +96,20 @@ namespace TerritoryKit.Unity
         private readonly Material _material;
         private readonly Stack<GameObject> _freeGameObjects = new Stack<GameObject>();
         private readonly Stack<Mesh> _freeMeshes = new Stack<Mesh>();
+
+        // What is currently checked out, so Release can reject a second release of the same unit.
+        // PooledTerritory is a readonly struct, which means a caller can hold a stale *copy* of a
+        // checkout it already returned; without this, releasing that copy would push the same
+        // GameObject and Mesh onto the free stacks twice and two later checkouts would be handed
+        // the same objects while both believed they owned them exclusively. Membership is checked
+        // on GameObject rather than Mesh because the two stacks are independent: after enough
+        // cycles a given GameObject and Mesh need not be paired the way they were originally.
+        //
+        // A HashSet<GameObject> of reference types does not allocate on Add/Remove/Contains once
+        // it has grown to its high-water mark, so this stays inside the zero-allocation budget
+        // TerritoryPoolTests asserts.
+        private readonly HashSet<GameObject> _checkedOut = new HashSet<GameObject>();
+
         private int _totalGameObjectsCreated;
         private int _totalMeshesCreated;
 
@@ -146,6 +160,16 @@ namespace TerritoryKit.Unity
         /// Checks out one GameObject and one Mesh, active and parented, ready for
         /// <see cref="MeshDecoder.Apply"/>.
         /// </summary>
+        /// <remarks>
+        /// The transform is reset to identity here, not merely reparented. A pooled GameObject
+        /// carries whatever transform it had when it was last released, and nothing guarantees
+        /// that was identity — a scene-view drag, an editor tool, or a caller reaching into
+        /// <see cref="PooledTerritory.GameObject"/> can all leave one behind. Territory meshes are
+        /// positioned entirely by their vertex data in the map root's local space
+        /// (<see cref="TerritoryMapPlacement"/>), so a non-identity local transform on a territory
+        /// object is always wrong; carrying a stale one into the next checkout would silently
+        /// offset a province.
+        /// </remarks>
         public PooledTerritory Checkout(string name)
         {
             GameObject go = _freeGameObjects.Count > 0 ? _freeGameObjects.Pop() : CreateGameObject();
@@ -155,9 +179,10 @@ namespace TerritoryKit.Unity
             var meshFilter = go.GetComponent<MeshFilter>();
             var renderer = go.GetComponent<MeshRenderer>();
             meshFilter.sharedMesh = mesh;
-            go.transform.SetParent(_parent, false);
+            ResetTransform(go.transform);
             go.SetActive(true);
 
+            _checkedOut.Add(go);
             return new PooledTerritory(go, meshFilter, renderer, mesh);
         }
 
@@ -169,6 +194,10 @@ namespace TerritoryKit.Unity
         /// property block survives on the renderer until something explicitly replaces or clears
         /// it.
         /// </remarks>
+        /// <exception cref="InvalidOperationException">
+        /// <paramref name="pooled"/> is not currently checked out — either it was released
+        /// already, or it never came from this pool.
+        /// </exception>
         public void Release(PooledTerritory pooled)
         {
             if (pooled.GameObject == null)
@@ -177,13 +206,40 @@ namespace TerritoryKit.Unity
                     "pooled is default(PooledTerritory), not a real checkout", nameof(pooled));
             }
 
+            if (!_checkedOut.Remove(pooled.GameObject))
+            {
+                // Loud rather than quiet: a double release corrupts the pool in a way that only
+                // shows up much later, as two territories rendering into the same Mesh.
+                throw new InvalidOperationException(
+                    "'" + pooled.GameObject.name + "' is not checked out of this pool; releasing " +
+                    "it again would put the same GameObject and Mesh on the free stacks twice and " +
+                    "hand them to two different territories at once");
+            }
+
             pooled.Renderer.SetPropertyBlock(null);
             pooled.MeshFilter.sharedMesh = null;
             pooled.GameObject.SetActive(false);
-            pooled.GameObject.transform.SetParent(_parent, false);
+            ResetTransform(pooled.GameObject.transform);
 
             _freeGameObjects.Push(pooled.GameObject);
             _freeMeshes.Push(pooled.Mesh);
+        }
+
+        /// <summary>
+        /// Puts a transform back to identity under the pool's parent, reparenting only when it
+        /// has actually drifted — <c>SetParent</c> on an unchanged parent still costs a hierarchy
+        /// change notification, and this runs on the streaming hot path.
+        /// </summary>
+        private void ResetTransform(Transform target)
+        {
+            if (target.parent != _parent)
+            {
+                target.SetParent(_parent, false);
+            }
+
+            target.localPosition = Vector3.zero;
+            target.localRotation = Quaternion.identity;
+            target.localScale = Vector3.one;
         }
 
         private GameObject CreateGameObject()
@@ -219,6 +275,11 @@ namespace TerritoryKit.Unity
             {
                 DestroyObject(_freeMeshes.Pop());
             }
+
+            // The pool is finished after this; anything still checked out is the caller's to
+            // destroy, and keeping it listed here would only make a later Release throw about a
+            // pool that no longer exists.
+            _checkedOut.Clear();
         }
 
         private static void DestroyObject(UnityEngine.Object target)
