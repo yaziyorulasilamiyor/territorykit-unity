@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -555,6 +556,317 @@ namespace TerritoryKit.Unity.Tests
             Assert.LessOrEqual(perTick, RequestingTickBudgetBytes,
                 $"a request-issuing tick allocated {perTick:F2} bytes, budget " +
                 $"{RequestingTickBudgetBytes}");
+        }
+
+        /// <summary>
+        /// Budget for a whole tick — the request *and* its asynchronous completion: HTTP,
+        /// container parse, per-territory decode, pool checkout and mesh upload.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="APanningTickStaysWithinItsPerRequestAllocationBudget"/> measures only what
+        /// <c>Tick()</c> does before its first await. That was the third version of the same
+        /// mistake: first the pool was gated and the streamer was not, then the counter turned
+        /// out to be a no-op on Mono, then the gate stopped at the first await while the real
+        /// work continued on later frames. This one runs until the tick genuinely completes.
+        /// <para>
+        /// Measured at <b>26.6 KB per tick</b> that swaps 20 territories out for 20 others
+        /// (Unity 6000.1.1f1, Windows Editor) — the fixed cost of a tick: two requests, the
+        /// container parse, 20 decodes, 20 pool checkouts and 20 mesh uploads.
+        /// </para>
+        /// <b>This does not cover the payload-proportional cost.</b> These fixtures are
+        /// four-vertex tiles; a real province averages 2,967 vertices (~41 KB encoded). Repeating
+        /// this measurement with province-sized meshes is not possible with a heap-occupancy
+        /// gauge — a single such tick allocates enough to trigger a collection, and
+        /// <see cref="AFullTickWithProvinceSizedMeshesStaysWithinItsCollectionBudget"/> gates
+        /// that case on collection count instead. The report states both, and states plainly that
+        /// streaming real meshes does <em>not</em> meet a "≈ zero allocation" bar.
+        /// </remarks>
+        private const long FullTickBudgetBytes = 64 * 1024;
+
+        [UnityTest]
+        public IEnumerator AFullTickIncludingItsAsyncCompletionStaysWithinItsBudget()
+        {
+            // Two disjoint halves of 20 territories each, so every pan is a full swap: 20 loaded,
+            // 20 released. A realistic unit to quote a per-tick figure against.
+            const int perHalf = 20;
+            var left = new System.Text.StringBuilder();
+            var right = new System.Text.StringBuilder();
+            for (int i = 0; i < perHalf; i++)
+            {
+                string l = "L" + i.ToString("D2");
+                string r = "R" + i.ToString("D2");
+                _server.Meshes[l] = Tile(i * 10f, 0f, i * 10f + 8f, 100f);
+                _server.Meshes[r] = Tile(1000f + i * 10f, 0f, 1000f + i * 10f + 8f, 100f);
+                if (i > 0) { left.Append(','); right.Append(','); }
+                left.Append('"').Append(l).Append('"');
+                right.Append('"').Append(r).Append('"');
+            }
+
+            string leftPage = @"{""territoryIds"":[" + left + @"],""nextCursor"":""""}";
+            string rightPage = @"{""territoryIds"":[" + right + @"],""nextCursor"":""""}";
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            // Warm up: JIT, first-use caches, and the pool growing to its working size. None of
+            // that is steady state and none of it should be charged to the budget.
+            for (int i = 0; i < 3; i++)
+            {
+                yield return PanAndWait(streamer, leftPage, 0f);
+                yield return PanAndWait(streamer, rightPage, 1000f);
+            }
+
+            Assert.AreEqual(perHalf, streamer.VisibleCount, "the fixture should show one half at a time");
+
+            // Idle baseline: the frame loop and test runner allocate on their own, and the
+            // measurement below spans frames, so their share has to be known to be subtracted.
+            const int baselineFrames = 120;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            int idleCollections = GC.CollectionCount(0);
+            long idleBefore = GC.GetTotalMemory(false);
+            for (int i = 0; i < baselineFrames; i++)
+            {
+                yield return null;
+            }
+
+            long idleAfter = GC.GetTotalMemory(false);
+            Assert.AreEqual(idleCollections, GC.CollectionCount(0),
+                "a collection during the idle baseline invalidates it");
+            double bytesPerIdleFrame = (idleAfter - idleBefore) / (double)baselineFrames;
+
+            // The measurement proper: whole ticks, each waited out to genuine completion.
+            const int ticks = 4;
+            double attributed = 0;
+            bool measured = false;
+            for (int attempt = 0; attempt < 4 && !measured; attempt++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                int collectionsBefore = GC.CollectionCount(0);
+                long before = GC.GetTotalMemory(false);
+                _framesElapsed = 0;
+
+                // Starts on the left because the warm-up above ends on the right: panning to
+                // where the camera already is issues no request at all, so the wait would simply
+                // time out. (It did, first time round.)
+                for (int i = 0; i < ticks; i++)
+                {
+                    yield return PanAndWait(streamer, i % 2 == 0 ? leftPage : rightPage,
+                        i % 2 == 0 ? 0f : 1000f);
+                }
+
+                long after = GC.GetTotalMemory(false);
+                int collections = GC.CollectionCount(0) - collectionsBefore;
+                if (collections != 0)
+                {
+                    TestContext.Out.WriteLine(
+                        $"attempt {attempt + 1}: {collections} collection(s) during {ticks} tick(s) " +
+                        $"over {_framesElapsed} frames; heap delta {after - before} (unusable)");
+                    continue; // a collection makes a heap-occupancy delta meaningless
+                }
+
+                double total = after - before;
+                double frameNoise = bytesPerIdleFrame * _framesElapsed;
+                attributed = (total - frameNoise) / ticks;
+                measured = true;
+
+                TestContext.Out.WriteLine(
+                    $"full streamer tick ({perHalf} in / {perHalf} out): {total} bytes over " +
+                    $"{ticks} ticks and {_framesElapsed} frames; idle baseline " +
+                    $"{bytesPerIdleFrame:F0} B/frame = {frameNoise:F0} B; attributed " +
+                    $"{attributed:F0} bytes/tick");
+            }
+
+            Assert.IsTrue(measured,
+                "every attempt was disturbed by a collection, which means a tick allocates " +
+                "enough to fill a freshly collected heap within " + ticks + " ticks");
+            Assert.LessOrEqual(attributed, FullTickBudgetBytes,
+                $"a full tick allocated {attributed:F0} bytes, budget {FullTickBudgetBytes}");
+        }
+
+        /// <summary>
+        /// Gen-0 collections a single tick may trigger while loading 20 province-sized meshes.
+        /// </summary>
+        /// <remarks>
+        /// A byte figure is unobtainable here: the only working counter on this runtime is the
+        /// managed heap gauge, and a heap gauge cannot measure allocation across a collection —
+        /// which this case reliably causes. Collection count is the honest proxy that remains.
+        /// It is a real bound, not a formality: one gen-0 collection means the tick allocated
+        /// roughly one nursery's worth, so a change that doubled allocation would show up as two.
+        /// <para>
+        /// Observed: <b>1 collection per tick, with a heap delta of ~2.2 MB across the window</b>
+        /// — about 110 KB per territory loaded, against a ~41 KB encoded payload. That is
+        /// megabytes of transient garbage per pan, and it is why the report no longer describes
+        /// streaming as near-zero-allocation; only the idle camera and the pool itself are.
+        /// </para>
+        /// </remarks>
+        private const int ProvinceTickCollectionBudget = 1;
+
+        [UnityTest]
+        public IEnumerator AFullTickWithProvinceSizedMeshesStaysWithinItsCollectionBudget()
+        {
+            const int perHalf = 20;
+            var left = new System.Text.StringBuilder();
+            var right = new System.Text.StringBuilder();
+            for (int i = 0; i < perHalf; i++)
+            {
+                string l = "L" + i.ToString("D2");
+                string r = "R" + i.ToString("D2");
+                _server.Meshes[l] = ProvinceSizedTile(i * 10f, 8f);
+                _server.Meshes[r] = ProvinceSizedTile(1000f + i * 10f, 8f);
+                if (i > 0) { left.Append(','); right.Append(','); }
+                left.Append('"').Append(l).Append('"');
+                right.Append('"').Append(r).Append('"');
+            }
+
+            string leftPage = @"{""territoryIds"":[" + left + @"],""nextCursor"":""""}";
+            string rightPage = @"{""territoryIds"":[" + right + @"],""nextCursor"":""""}";
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            for (int i = 0; i < 2; i++)
+            {
+                yield return PanAndWait(streamer, leftPage, 0f);
+                yield return PanAndWait(streamer, rightPage, 1000f);
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            int before = GC.CollectionCount(0);
+            long heapBefore = GC.GetTotalMemory(false);
+
+            // One tick, ending on the half the warm-up did not leave the camera on.
+            yield return PanAndWait(streamer, leftPage, 0f);
+
+            int collections = GC.CollectionCount(0) - before;
+            long heapDelta = GC.GetTotalMemory(false) - heapBefore;
+
+            TestContext.Out.WriteLine(
+                $"province-sized tick ({perHalf} in / {perHalf} out, ~41 KB payload each): " +
+                $"{collections} gen-0 collection(s), heap delta {heapDelta} bytes " +
+                "(a floor, not a total -- the collection freed some of what was allocated)");
+
+            Assert.AreEqual(perHalf, streamer.VisibleCount);
+            Assert.LessOrEqual(collections, ProvinceTickCollectionBudget,
+                $"one tick triggered {collections} gen-0 collections, budget " +
+                $"{ProvinceTickCollectionBudget}; each one is roughly a nursery of garbage");
+        }
+
+        private int _framesElapsed;
+
+        /// <summary>Moves the camera onto one half, waits for the tick to fully complete, counts frames.</summary>
+        private IEnumerator PanAndWait(ViewportStreamer streamer, string page, float x)
+        {
+            _server.ViewportPages.Clear();
+            _server.ViewportPages.Add(page);
+            TerritoryMapPlacement.FrameBounds(_camera, x, 0f, x + perHalfWidth, 100f, padding: 1f);
+
+            bool done = false;
+            streamer.TickObserver = () => done = true;
+            float deadline = Time.realtimeSinceStartup + 10f;
+            while (!done && Time.realtimeSinceStartup < deadline)
+            {
+                _framesElapsed++;
+                yield return null;
+            }
+
+            streamer.TickObserver = null;
+            if (!done)
+            {
+                int reqs;
+                string lastViewport;
+                lock (_server.Requests)
+                {
+                    reqs = _server.Requests.Count;
+                    lastViewport = FindLastViewportRequest(_server);
+                }
+
+                TestContext.Out.WriteLine(
+                    $"DIAG stuck: requests={reqs} lastViewport={lastViewport} " +
+                    $"visible={streamer.VisibleCount} lod={streamer.CurrentLod} " +
+                    $"pool created={streamer.PoolStats.TotalGameObjectsCreated} " +
+                    $"free={streamer.PoolStats.FreeGameObjects}");
+            }
+
+            Assert.IsTrue(done, "a tick did not complete within the deadline");
+        }
+
+        private const float perHalfWidth = 200f;
+
+        /// <summary>
+        /// A clockwise triangle strip the size of an average province in the real dataset.
+        /// </summary>
+        /// <remarks>
+        /// 1,483 quads gives 2,968 vertices and 2,966 triangles, against the measured average of
+        /// 2,967 vertices / 2,950 triangles per province at <c>high</c> (240,379 / 238,969 across
+        /// 81 provinces). This matters for the allocation figure: transient <c>byte[]</c> copies
+        /// of the payload dominate a tick's cost, so measuring against four-vertex toy tiles —
+        /// as the first version of this test did — understates it by two orders of magnitude.
+        /// Still under the 65,535 ceiling, so the uint16 index path is the one exercised, same
+        /// as the real data.
+        /// </remarks>
+        private static byte[] ProvinceSizedTile(float x0, float width)
+        {
+            const int quads = 1483;
+            var vertices = new float[(quads + 1) * 2 * 2];
+            var indices = new int[quads * 6];
+            float step = width / quads;
+
+            for (int i = 0; i <= quads; i++)
+            {
+                float x = x0 + i * step;
+                vertices[i * 4 + 0] = x;
+                vertices[i * 4 + 1] = 0f;
+                vertices[i * 4 + 2] = x;
+                vertices[i * 4 + 3] = 100f;
+            }
+
+            for (int i = 0; i < quads; i++)
+            {
+                int v = i * 2;
+                // Clockwise with +X right and +Y up, matching what the encoder emits.
+                indices[i * 6 + 0] = v;
+                indices[i * 6 + 1] = v + 1;
+                indices[i * 6 + 2] = v + 3;
+                indices[i * 6 + 3] = v;
+                indices[i * 6 + 4] = v + 3;
+                indices[i * 6 + 5] = v + 2;
+            }
+
+            return TkmsFixture.Build(vertices, indices);
+        }
+
+        [UnityTest]
+        public IEnumerator AFailedMetadataLoadReportsItselfInsteadOfDyingSilently()
+        {
+            // Start is an async void method: before this, anything other than a cancellation
+            // escaping the metadata fetch went to Unity's unhandled-task path and the component
+            // just never ticked again. The same shape as the Shader.Find failure that took the
+            // whole streamer down with an ArgumentNullException a reader could not act on.
+            _server.ForcedStatus = 404;
+            _server.ForcedBody = @"{""error"":{""code"":""dataset_not_found"",""message"":""no such dataset""}}";
+
+            LogAssert.Expect(LogType.Error, new Regex("could not load dataset .* nothing will stream"));
+
+            var streamer = CreateStreamer();
+
+            float deadline = Time.realtimeSinceStartup + 5f;
+            while (streamer.enabled && Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            Assert.IsFalse(streamer.enabled,
+                "a streamer that cannot load its dataset should disable itself, not sit there " +
+                "ticking against a null Dataset");
+            Assert.IsNull(streamer.Dataset);
         }
 
         [UnityTest]

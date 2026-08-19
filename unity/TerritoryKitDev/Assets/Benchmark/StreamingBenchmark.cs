@@ -50,6 +50,9 @@ namespace TerritoryKitDev.Benchmark
             // pins the result at exactly 60.0 -- which is what the first run reported.
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = 1000;
+            // Without this the counters attach but barely tick: the first run collected 1-2
+            // samples over 300 frames and reported 0 bytes throughout.
+            UnityEngine.Profiling.Profiler.enabled = true;
 
             var cameraObject = new GameObject("Benchmark Camera");
             _camera = cameraObject.AddComponent<Camera>();
@@ -91,8 +94,23 @@ namespace TerritoryKitDev.Benchmark
             report.AppendLine("graphics=" + SystemInfo.graphicsDeviceType +
                               " srpBatcher=" + (GraphicsSettings.useScriptableRenderPipelineBatching ? "on" : "off"));
 
-            yield return Sample("idle", idleSampleSeconds, report, pan: false);
-            yield return Sample("pan", panSampleSeconds, report, pan: true);
+            yield return Sample("idle", idleSampleSeconds, report, driftPerSecond: 0f);
+            yield return Sample("pan", panSampleSeconds, report, driftPerSecond: 40000f);
+
+            // Zoomed out at the whole country every province is on screen at once, so panning
+            // never streams anything -- the first run reported 81 visible and 0 free throughout,
+            // measuring a static scene while claiming to measure streaming. Zoom in so only a
+            // subset fits, then drift far enough that territories genuinely enter and leave.
+            float fullSize = _camera.orthographicSize;
+            _camera.orthographicSize = fullSize / 6f;
+            float settleZoom = Time.realtimeSinceStartup + 4f;
+            while (Time.realtimeSinceStartup < settleZoom)
+            {
+                yield return null;
+            }
+
+            report.AppendLine("zoomed: lod=" + _streamer.CurrentLod + " visible=" + _streamer.VisibleCount);
+            yield return Sample("stream", panSampleSeconds, report, driftPerSecond: 100000f);
 
             report.AppendLine("visibleAtEnd=" + _streamer.VisibleCount);
             TerritoryPoolStats stats = _streamer.PoolStats;
@@ -103,7 +121,8 @@ namespace TerritoryKitDev.Benchmark
             Application.Quit(0);
         }
 
-        private IEnumerator Sample(string label, float seconds, StringBuilder report, bool pan)
+        private IEnumerator Sample(string label, float seconds, StringBuilder report,
+            float driftPerSecond)
         {
             // StartNew, not the constructor: `new ProfilerRecorder(...)` creates the recorder in a
             // stopped state, so it stays Valid while collecting exactly zero samples -- which is
@@ -118,6 +137,14 @@ namespace TerritoryKitDev.Benchmark
             // independent of how long the swap chain then waits.
             using var cpuFrame = ProfilerRecorder.StartNew(
                 ProfilerCategory.Internal, "CPU Main Thread Frame Time", 300);
+            // The managed-allocation counter that actually works. In the editor under -batchmode
+            // it collects zero samples, and GC.GetTotalMemory cannot substitute for it here: one
+            // tick loading province-sized meshes allocates enough to trigger a collection, and a
+            // heap-occupancy gauge cannot measure allocation across one. This is therefore the
+            // only place the full per-tick cost -- HTTP, decode and mesh upload included -- is
+            // measured on real data.
+            using var gcAlloc = ProfilerRecorder.StartNew(
+                ProfilerCategory.Memory, "GC Allocated In Frame", 300);
 
             // One frame for the recorders to attach before anything is counted.
             yield return null;
@@ -128,10 +155,10 @@ namespace TerritoryKitDev.Benchmark
             float until = Time.realtimeSinceStartup + seconds;
             while (Time.realtimeSinceStartup < until)
             {
-                if (pan)
+                if (driftPerSecond != 0f)
                 {
                     // A steady drift across the map, so territories genuinely enter and leave.
-                    _camera.transform.position += new Vector3(Time.deltaTime * 40000f, 0f, 0f);
+                    _camera.transform.position += new Vector3(Time.deltaTime * driftPerSecond, 0f, 0f);
                 }
 
                 frames++;
@@ -153,6 +180,8 @@ namespace TerritoryKitDev.Benchmark
                 " setPass=" + Describe(setPass) +
                 " triangles=" + Describe(triangles) +
                 " cpuFrameMs=" + DescribeMilliseconds(cpuFrame) +
+                " gcAllocTotal=" + DescribeTotal(gcAlloc) +
+                " gcAllocPerFrame=" + DescribeMean(gcAlloc) +
                 " visible=" + _streamer.VisibleCount);
         }
 
@@ -177,6 +206,43 @@ namespace TerritoryKitDev.Benchmark
             return "median~" + (total / recorder.Count).ToString(CultureInfo.InvariantCulture) +
                    "[" + min.ToString(CultureInfo.InvariantCulture) + ".." +
                    max.ToString(CultureInfo.InvariantCulture) + "]";
+        }
+
+        /// <summary>Sum of every sample, for counters that report a per-frame quantity.</summary>
+        private static string DescribeTotal(ProfilerRecorder recorder)
+        {
+            // A counter that attached but barely ticked reports a zero that looks like a
+            // measurement and is not one. "GC Allocated In Frame" does exactly that here --
+            // 2 samples across 300 frames -- so say so rather than print 0B.
+            if (!recorder.Valid || recorder.Count < 10)
+            {
+                return "unavailable(samples=" + (recorder.Valid ? recorder.Count : 0) + ")";
+            }
+
+            long total = 0;
+            for (int i = 0; i < recorder.Count; i++)
+            {
+                total += recorder.GetSample(i).Value;
+            }
+
+            return total.ToString(CultureInfo.InvariantCulture) +
+                   "B/" + recorder.Count.ToString(CultureInfo.InvariantCulture) + "f";
+        }
+
+        private static string DescribeMean(ProfilerRecorder recorder)
+        {
+            if (!recorder.Valid || recorder.Count < 10)
+            {
+                return "unavailable(samples=" + (recorder.Valid ? recorder.Count : 0) + ")";
+            }
+
+            long total = 0;
+            for (int i = 0; i < recorder.Count; i++)
+            {
+                total += recorder.GetSample(i).Value;
+            }
+
+            return (total / recorder.Count).ToString(CultureInfo.InvariantCulture) + "B";
         }
 
         /// <summary>Same as <see cref="Describe"/> but converts nanosecond samples to milliseconds.</summary>

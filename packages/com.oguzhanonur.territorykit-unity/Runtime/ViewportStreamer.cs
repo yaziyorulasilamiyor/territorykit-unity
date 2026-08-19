@@ -254,6 +254,22 @@ namespace TerritoryKit.Unity
             {
                 // Destroyed before the first metadata fetch returned.
             }
+            catch (Exception exception)
+            {
+                // Everything else -- server down, DNS failure, a 404 for the dataset id, a body
+                // that is not the JSON this expects. This is an async void method, so an
+                // exception escaping here goes to Unity's unhandled-task path: the component
+                // simply never ticks again, with a stack trace that names the transport rather
+                // than the thing the reader can fix. TerritoryMapRenderer has always caught
+                // broadly here; this brings the two in line.
+                Debug.LogError(
+                    "[TerritoryKit] could not load dataset '" + datasetId + "' from " + baseUrl +
+                    ", so nothing will stream. Check that the geometry API is running and that " +
+                    "the dataset id exists (GET " + baseUrl + "/v1/datasets). On Windows prefer " +
+                    "127.0.0.1 over localhost, which resolves to ::1 first. Underlying error: " +
+                    exception.Message, this);
+                enabled = false;
+            }
         }
 
         private void Update()
