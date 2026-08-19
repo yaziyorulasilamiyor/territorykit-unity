@@ -22,12 +22,13 @@ namespace TerritoryKit.Unity
     public readonly struct PooledTerritory
     {
         internal PooledTerritory(GameObject gameObject, MeshFilter meshFilter, MeshRenderer renderer,
-            Mesh mesh)
+            Mesh mesh, int version)
         {
             GameObject = gameObject;
             MeshFilter = meshFilter;
             Renderer = renderer;
             Mesh = mesh;
+            Version = version;
         }
 
         public GameObject GameObject { get; }
@@ -37,6 +38,18 @@ namespace TerritoryKit.Unity
         public MeshRenderer Renderer { get; }
 
         public Mesh Mesh { get; }
+
+        /// <summary>
+        /// Which checkout of <see cref="GameObject"/> this value refers to.
+        /// </summary>
+        /// <remarks>
+        /// The pool bumps a per-GameObject counter on every checkout <em>and</em> every release,
+        /// so this identifies one specific checkout rather than merely "some checkout of this
+        /// object". Without it a stale struct copy could be released a second time after its
+        /// GameObject had already been checked back out — the ABA case: the object looks checked
+        /// out because it genuinely is, just not by the copy doing the releasing.
+        /// </remarks>
+        internal int Version { get; }
     }
 
     /// <summary>Point-in-time pool counters, for tests and the phase report.</summary>
@@ -97,18 +110,25 @@ namespace TerritoryKit.Unity
         private readonly Stack<GameObject> _freeGameObjects = new Stack<GameObject>();
         private readonly Stack<Mesh> _freeMeshes = new Stack<Mesh>();
 
-        // What is currently checked out, so Release can reject a second release of the same unit.
-        // PooledTerritory is a readonly struct, which means a caller can hold a stale *copy* of a
-        // checkout it already returned; without this, releasing that copy would push the same
+        // Current checkout version per GameObject, so Release can reject anything that is not the
+        // live checkout. PooledTerritory is a readonly struct, which means a caller can hold a
+        // stale *copy* of a checkout it already returned; releasing that copy would push the same
         // GameObject and Mesh onto the free stacks twice and two later checkouts would be handed
-        // the same objects while both believed they owned them exclusively. Membership is checked
-        // on GameObject rather than Mesh because the two stacks are independent: after enough
-        // cycles a given GameObject and Mesh need not be paired the way they were originally.
+        // the same objects while both believed they owned them exclusively.
         //
-        // A HashSet<GameObject> of reference types does not allocate on Add/Remove/Contains once
-        // it has grown to its high-water mark, so this stays inside the zero-allocation budget
-        // TerritoryPoolTests asserts.
-        private readonly HashSet<GameObject> _checkedOut = new HashSet<GameObject>();
+        // The counter is bumped on checkout *and* on release, which is what makes it an identity
+        // for one specific checkout rather than a mere "is it out right now" flag. A flag alone
+        // (the previous HashSet) closed the immediate double release but not the ABA case:
+        // release, check the same object back out, then release the stale copy again -- the
+        // object really is checked out, so a membership test says yes and the pool is corrupted
+        // anyway. Version equality says no, because the live checkout is two bumps further on.
+        //
+        // Keyed on GameObject rather than Mesh because the two stacks are independent: after
+        // enough cycles a given GameObject and Mesh need not be paired the way they once were.
+        // Dictionary<GameObject, int> does not allocate on lookup or on assigning an existing
+        // key, so this stays inside the zero-allocation budget TerritoryPoolTests asserts.
+        private readonly Dictionary<GameObject, int> _checkoutVersion =
+            new Dictionary<GameObject, int>();
 
         private int _totalGameObjectsCreated;
         private int _totalMeshesCreated;
@@ -182,8 +202,9 @@ namespace TerritoryKit.Unity
             ResetTransform(go.transform);
             go.SetActive(true);
 
-            _checkedOut.Add(go);
-            return new PooledTerritory(go, meshFilter, renderer, mesh);
+            int version = _checkoutVersion[go] + 1;
+            _checkoutVersion[go] = version;
+            return new PooledTerritory(go, meshFilter, renderer, mesh, version);
         }
 
         /// <summary>Returns a checked-out unit to the pool.</summary>
@@ -206,15 +227,26 @@ namespace TerritoryKit.Unity
                     "pooled is default(PooledTerritory), not a real checkout", nameof(pooled));
             }
 
-            if (!_checkedOut.Remove(pooled.GameObject))
+            if (!_checkoutVersion.TryGetValue(pooled.GameObject, out int current))
+            {
+                throw new InvalidOperationException(
+                    "'" + pooled.GameObject.name + "' did not come from this pool");
+            }
+
+            if (current != pooled.Version)
             {
                 // Loud rather than quiet: a double release corrupts the pool in a way that only
-                // shows up much later, as two territories rendering into the same Mesh.
+                // shows up much later, as two territories rendering into the same Mesh. The
+                // version mismatch covers both shapes -- releasing the same checkout twice, and
+                // releasing a stale copy after the object has been checked out again (ABA).
                 throw new InvalidOperationException(
-                    "'" + pooled.GameObject.name + "' is not checked out of this pool; releasing " +
-                    "it again would put the same GameObject and Mesh on the free stacks twice and " +
-                    "hand them to two different territories at once");
+                    "'" + pooled.GameObject.name + "' is not the live checkout (this value is " +
+                    "version " + pooled.Version + ", the pool is on " + current + "); releasing " +
+                    "it would put the same GameObject and Mesh on the free stacks twice and hand " +
+                    "them to two different territories at once");
             }
+
+            _checkoutVersion[pooled.GameObject] = current + 1;
 
             pooled.Renderer.SetPropertyBlock(null);
             pooled.MeshFilter.sharedMesh = null;
@@ -250,6 +282,9 @@ namespace TerritoryKit.Unity
             var renderer = go.AddComponent<MeshRenderer>();
             renderer.sharedMaterial = _material;
             go.SetActive(false);
+            // Seeded here so Checkout's read-modify-write never has to branch on a missing key,
+            // and so an object from another pool is distinguishable by its absence.
+            _checkoutVersion[go] = 0;
             _totalGameObjectsCreated++;
             return go;
         }
@@ -279,7 +314,7 @@ namespace TerritoryKit.Unity
             // The pool is finished after this; anything still checked out is the caller's to
             // destroy, and keeping it listed here would only make a later Release throw about a
             // pool that no longer exists.
-            _checkedOut.Clear();
+            _checkoutVersion.Clear();
         }
 
         private static void DestroyObject(UnityEngine.Object target)

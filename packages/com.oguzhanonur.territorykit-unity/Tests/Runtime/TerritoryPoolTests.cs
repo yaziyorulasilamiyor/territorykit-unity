@@ -165,6 +165,57 @@ namespace TerritoryKit.Unity.Tests
         }
 
         [Test]
+        public void ReleasingAStaleCopyAfterTheObjectWasCheckedOutAgainIsRefused()
+        {
+            // ABA. A membership flag ("is this object checked out?") is not enough here: by the
+            // time the stale copy is released the object genuinely *is* checked out again, so the
+            // flag says yes and the pool is corrupted anyway -- the same GameObject and Mesh land
+            // on the free stacks twice and two later checkouts are handed the same objects.
+            //
+            // With one warmed unit the pool must hand back the same GameObject, which is what
+            // makes the sequence below an A-B-A rather than three different objects.
+            _pool.WarmUp(1);
+            PooledTerritory first = _pool.Checkout("a");
+            _pool.Release(first);
+            PooledTerritory second = _pool.Checkout("b");
+            Assert.AreSame(first.GameObject, second.GameObject, "the ABA case needs the same object back");
+
+            Assert.Throws<InvalidOperationException>(() => _pool.Release(first),
+                "the stale copy names a checkout that has already ended");
+
+            // The live checkout is still releasable, and releasing it leaves exactly one free unit.
+            Assert.DoesNotThrow(() => _pool.Release(second));
+            Assert.AreEqual(1, _pool.Stats.FreeGameObjects);
+            Assert.AreEqual(1, _pool.Stats.FreeMeshes);
+        }
+
+        [Test]
+        public void TwoCheckoutsAfterARefusedStaleReleaseAreStillDistinct()
+        {
+            // The consequence the version guard exists to prevent, asserted directly.
+            _pool.WarmUp(1);
+            PooledTerritory first = _pool.Checkout("a");
+            _pool.Release(first);
+            PooledTerritory second = _pool.Checkout("b");
+            try
+            {
+                _pool.Release(first);
+            }
+            catch (InvalidOperationException)
+            {
+                // expected
+            }
+
+            _pool.Release(second);
+
+            PooledTerritory x = _pool.Checkout("x");
+            PooledTerritory y = _pool.Checkout("y");
+            Assert.AreNotSame(x.GameObject, y.GameObject,
+                "a duplicated free entry would hand the same GameObject to two territories");
+            Assert.AreNotSame(x.Mesh, y.Mesh);
+        }
+
+        [Test]
         public void ReleasingSomethingThisPoolNeverHandedOutIsRefused()
         {
             var foreignParent = new GameObject("foreign-parent");
