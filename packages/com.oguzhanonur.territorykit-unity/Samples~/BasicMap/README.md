@@ -51,6 +51,15 @@ is where you start (closest zoom): its simplification step changes nothing —
 `simplification.topologyChanged` is `false` — so if something looks wrong on screen at that
 level, the cause is on the client side rather than in geometry the simplifier merged.
 
+## Don't drag territories in the Scene view
+
+The objects under `Territories` are pooled and positioned entirely by their mesh data — their
+local transforms are always identity, and `TerritoryPool` resets them on every checkout and
+release. Moving one with the Scene view's Move gizmo therefore achieves nothing that survives
+the next tick, and the editor's own drag maths can produce `NaN` deltas that surface as errors
+from `UnityEditor.TransformManipulator` with no runtime code involved. Pan the *camera* instead
+(right-drag in Play mode); to move the whole map, move the `Territory Map` object.
+
 ## The warning in the console
 
 Clicking a territory logs the level's picking-safety verdict when it is unsafe, and on the
