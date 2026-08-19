@@ -137,23 +137,53 @@ namespace TerritoryKit.Unity
         /// <returns>False if the ray is parallel to the plane or points away from it.</returns>
         public static bool TryGroundPlanePoint(Transform mapRoot, Ray ray, out Vector2 local)
         {
+            local = default;
             if (mapRoot == null)
             {
-                local = default;
+                return false;
+            }
+
+            // Defensive, not a fix for any known producer: every value below comes from a
+            // Transform or a Camera, and either can be left non-finite by something outside this
+            // package (an editor tool mid-drag, a script writing a NaN position, a camera with a
+            // degenerate projection). Without these checks a single NaN propagates silently into
+            // the bbox sent to /viewport, or into a pick result, and surfaces far from its cause.
+            // Returning false instead means "this frame has no answer", which every caller
+            // already handles.
+            if (!IsFinite(ray.origin) || !IsFinite(ray.direction) ||
+                !IsFinite(mapRoot.position) || !IsFinite(mapRoot.forward))
+            {
                 return false;
             }
 
             var plane = new Plane(mapRoot.forward, mapRoot.position);
-            if (!plane.Raycast(ray, out float distance))
+            if (!plane.Raycast(ray, out float distance) || !IsFinite(distance))
             {
-                local = default;
                 return false;
             }
 
             Vector3 worldPoint = ray.GetPoint(distance);
             Vector3 localPoint = mapRoot.InverseTransformPoint(worldPoint);
+            if (!IsFinite(localPoint))
+            {
+                return false;
+            }
+
             local = new Vector2(localPoint.x, localPoint.y);
             return true;
+        }
+
+        /// <summary>True when every component is a real number — not NaN and not infinite.</summary>
+        internal static bool IsFinite(Vector3 value)
+        {
+            return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+        }
+
+        internal static bool IsFinite(float value)
+        {
+            // float.IsFinite exists on .NET Standard 2.1 but not on the 2.0 profile Unity still
+            // permits, so this is spelled out rather than delegated.
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         /// <summary>
