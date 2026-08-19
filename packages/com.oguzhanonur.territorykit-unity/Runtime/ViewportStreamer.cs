@@ -229,6 +229,19 @@ namespace TerritoryKit.Unity
             _scratchBlock = new MaterialPropertyBlock();
             EnsureMapRoot();
             EnsureMaterial();
+
+            if (_material == null)
+            {
+                // EnsureMaterial has already logged what went wrong. Stop cleanly rather than
+                // constructing a pool with a null material: this is an async void method, so the
+                // ArgumentNullException that used to follow could not be caught by anyone and
+                // took the whole component down with a second, less informative error. Found by
+                // running an actual standalone player, where Shader.Find returns null unless the
+                // shader is in Always Included Shaders -- see the package README.
+                enabled = false;
+                return;
+            }
+
             _pool = new TerritoryPool(_mapRootTransform, _material);
             _pool.WarmUp(warmPoolSize);
             _client = new TerritoryClient(baseUrl, DiskCache);
@@ -692,7 +705,16 @@ namespace TerritoryKit.Unity
             Shader shader = Shader.Find("Unlit/Color") ?? Shader.Find("Universal Render Pipeline/Unlit");
             if (shader == null)
             {
-                Debug.LogError("[TerritoryKit] no unlit shader found; territories will not draw", this);
+                // Common in a built player rather than in the editor: Shader.Find only sees
+                // shaders the build actually included, and a built-in shader no material in any
+                // scene references is stripped. Project Settings > Graphics > Always Included
+                // Shaders is the fix, so the message says so instead of leaving the reader to
+                // discover that the same scene works in the editor and not in a build.
+                Debug.LogError(
+                    "[TerritoryKit] neither 'Unlit/Color' nor 'Universal Render Pipeline/Unlit' " +
+                    "could be found, so territories cannot be drawn. In a built player this " +
+                    "usually means the shader was stripped: add it to Project Settings > " +
+                    "Graphics > Always Included Shaders, or assign a material yourself.", this);
                 return;
             }
 

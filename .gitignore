@@ -49,3 +49,8 @@ unity/TerritoryKitDev/Assets/Samples/
 
 # Throwaway copy used to run Unity tests while the interactive Editor holds the main project lock
 unity/TerritoryKitDev-ci/
+
+# Benchmark harness output (scripts/measure_render.ps1)
+unity/BenchmarkBuild/
+benchmark-result.txt
+unity/TerritoryKitDev/Assets/Benchmark/BenchmarkScene.unity*

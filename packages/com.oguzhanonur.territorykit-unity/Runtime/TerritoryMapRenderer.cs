@@ -314,7 +314,13 @@ namespace TerritoryKit.Unity
                             Shader.Find("Universal Render Pipeline/Unlit");
             if (shader == null)
             {
-                Debug.LogError("[TerritoryKit] no unlit shader found; territories will not draw", this);
+                // Usually a built player rather than the editor: Shader.Find only sees shaders
+                // the build included, and a built-in shader no material references is stripped.
+                Debug.LogError(
+                    "[TerritoryKit] neither 'Unlit/Color' nor 'Universal Render Pipeline/Unlit' " +
+                    "could be found, so territories cannot be drawn. In a built player this " +
+                    "usually means the shader was stripped: add it to Project Settings > " +
+                    "Graphics > Always Included Shaders, or assign a material yourself.", this);
                 return;
             }
 

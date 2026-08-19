@@ -50,6 +50,15 @@ Or drop a `TerritoryMapRenderer` on a GameObject and let it load the whole datas
 `ViewportStreamer` to pool GameObjects/meshes and stream by camera viewport instead. The
 **Basic Map** sample uses `ViewportStreamer`, with pan, zoom and click-to-highlight.
 
+## Building a player
+
+`TerritoryMapRenderer` and `ViewportStreamer` both build their material at runtime from
+`Shader.Find("Unlit/Color")`. `Shader.Find` only sees shaders the build actually included, and a
+built-in shader that no material in any scene references is stripped — so a scene that renders
+correctly in the editor can draw nothing at all in a build. Add **Unlit/Color** to *Project
+Settings → Graphics → Always Included Shaders*, or assign your own material. Both components log
+the fix and stop cleanly rather than throwing when the shader is missing.
+
 ## Coordinates
 
 Meshes arrive in local metres relative to a per-dataset origin, never in degrees — `float32`
