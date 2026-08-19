@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Globalization;
 using NUnit.Framework;
@@ -56,8 +57,8 @@ namespace TerritoryKit.Unity.Tests
         [TearDown]
         public void TearDown()
         {
-            if (_host != null) Object.DestroyImmediate(_host);
-            if (_camera != null) Object.DestroyImmediate(_camera.gameObject);
+            if (_host != null) UnityEngine.Object.DestroyImmediate(_host);
+            if (_camera != null) UnityEngine.Object.DestroyImmediate(_camera.gameObject);
             _server?.Dispose();
             _server = null;
         }
@@ -430,6 +431,130 @@ namespace TerritoryKit.Unity.Tests
             {
                 LogAssert.ignoreFailingMessages = false;
             }
+        }
+
+        // ---- allocation gates over the whole tick -------------------------------------------
+        //
+        // TerritoryPoolTests gates the pool's checkout/release cycle at 0 bytes. That is a true
+        // statement about the pool and was a misleading one about the component that drives it:
+        // an idle camera still ticked ~5 times a second, and each tick allocated a fresh
+        // thresholds array before deciding it had nothing to do.
+
+        /// <summary>Budget for a tick that decides the camera has not moved far enough to matter.</summary>
+        /// <remarks>
+        /// Zero, measured. The skip path reads the camera, hits the cached thresholds array,
+        /// compares two structs and returns; every value on it is a struct or a cached reference,
+        /// there is no string formatting, and nothing is boxed.
+        /// </remarks>
+        private const long IdleTickBudgetBytes = 0;
+
+        [UnityTest]
+        public IEnumerator AnIdleCameraTickAllocatesNothing()
+        {
+            _server.Meshes["a"] = Tile(0f, 0f, 100f, 100f);
+            _server.ViewportPages.Add(@"{""territoryIds"":[""a""],""nextCursor"":""""}");
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            TerritoryMapPlacement.FrameBounds(_camera, 0f, 0f, 100f, 100f, padding: 1f);
+            yield return WaitForTick(streamer);
+
+            int requestsBefore;
+            lock (_server.Requests)
+            {
+                requestsBefore = _server.Requests.Count;
+            }
+
+            // Everything below is the steady state: the camera has not moved, so every tick
+            // should reach the "still inside the box we already requested" branch and stop.
+            double perTick = AllocationMeasurement.BytesPerIteration(
+                "idle streamer tick", 500, () => streamer.TickForTests());
+
+            lock (_server.Requests)
+            {
+                Assert.AreEqual(requestsBefore, _server.Requests.Count,
+                    "an idle camera must issue no requests -- otherwise this measured the " +
+                    "request path and the budget below means something else entirely");
+            }
+
+            Assert.LessOrEqual(perTick, IdleTickBudgetBytes,
+                $"an idle camera must not allocate: {perTick:F2} bytes/tick, budget " +
+                $"{IdleTickBudgetBytes}");
+        }
+
+        /// <summary>Budget for a tick that actually decides to issue a request.</summary>
+        /// <remarks>
+        /// Measured at <b>4.0–7.7 KB per request</b> across four runs (Unity 6000.1.1f1, Windows
+        /// Editor). Two things widen that into a range rather than a figure, and both mean it is
+        /// an <em>upper bound</em>: <c>GC.GetTotalMemory</c> is process-wide, so the in-process
+        /// <see cref="MockGeometryServer"/> handling the very same request is charged to it too;
+        /// and the gauge moves in 4 KB heap pages, so a 100-iteration window quantises. Not zero
+        /// regardless, and not reducible to zero without restructuring the request path away from
+        /// async/await. Per issued request it covers, in rough order of size: the
+        /// <c>UnityWebRequest</c> and its <c>DownloadHandlerBuffer</c>; the async state-machine
+        /// boxes for the five nested methods a viewport call goes through (<c>RunTickAsync</c>,
+        /// <c>GetAllViewportIdsAsync</c>, <c>GetViewportAsync</c>, <c>GetJsonAsync</c>,
+        /// <c>SendAsync</c>) plus their <c>TaskCompletionSource</c>; the linked
+        /// <c>CancellationTokenSource</c> and its registration; and the URL, built from a
+        /// <c>StringBuilder</c> and four <c>float.ToString("R")</c> results in
+        /// <c>FormatBbox</c>.
+        /// <para>
+        /// The distinction that matters is that this is charged <em>per request</em>, not per
+        /// frame. At the default 0.2 s tick interval a continuously panning camera issues at most
+        /// five requests a second — about 25 KB/s while the user is actually dragging — and a
+        /// camera at rest issues none and allocates nothing at all, which is what
+        /// <see cref="AnIdleCameraTickAllocatesNothing"/> pins at exactly zero.
+        /// </para>
+        /// The budget sits above the top of the observed range — tight enough that a regression
+        /// doubling the real cost fails, loose enough that the measurement noise described above
+        /// does not make this flaky.
+        /// </remarks>
+        private const long RequestingTickBudgetBytes = 16384;
+
+        [UnityTest]
+        public IEnumerator APanningTickStaysWithinItsPerRequestAllocationBudget()
+        {
+            _server.ViewportPages.Add(@"{""territoryIds"":[],""nextCursor"":""""}");
+
+            var streamer = CreateStreamer();
+            yield return WaitForDataset(streamer);
+
+            // FrameBounds first, and not as a formality: it is what puts the camera *above* the
+            // ground plane looking down. Without it the camera sits at the origin, inside the
+            // plane, every corner ray runs parallel to it, CameraGroundBounds returns null, and
+            // Tick() returns before issuing anything -- the first version of this test measured
+            // that early return and reported a flattering zero.
+            TerritoryMapPlacement.FrameBounds(_camera, 0f, 0f, 1000f, 1000f, padding: 1f);
+            yield return WaitForTick(streamer);
+
+            int requestsBefore;
+            lock (_server.Requests)
+            {
+                requestsBefore = _server.Requests.Count;
+            }
+
+            // Each move puts the camera outside the last requested box, so every tick issues a
+            // request rather than skipping.
+            double perTick = AllocationMeasurement.BytesPerIteration(
+                "requesting streamer tick", 100, () =>
+                {
+                    _camera.transform.position += new Vector3(5000f, 0f, 0f);
+                    streamer.TickForTests();
+                });
+
+            int requestsAfter;
+            lock (_server.Requests)
+            {
+                requestsAfter = _server.Requests.Count;
+            }
+
+            Assert.Greater(requestsAfter, requestsBefore,
+                "this test only means anything if the ticks it measured actually issued requests");
+
+            Assert.LessOrEqual(perTick, RequestingTickBudgetBytes,
+                $"a request-issuing tick allocated {perTick:F2} bytes, budget " +
+                $"{RequestingTickBudgetBytes}");
         }
 
         [UnityTest]

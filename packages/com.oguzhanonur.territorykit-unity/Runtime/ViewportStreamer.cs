@@ -209,6 +209,20 @@ namespace TerritoryKit.Unity
             _tickGeneration++;
         }
 
+        /// <summary>
+        /// Test seam: runs one tick synchronously, bypassing the <see cref="Update"/> interval.
+        /// </summary>
+        /// <remarks>
+        /// Exists for the allocation gate. Measuring the tick through the normal frame loop would
+        /// fold in the test runner's and the engine's own per-frame allocations, which would
+        /// swamp the number being measured; calling the tick directly makes the measurement
+        /// about this component and nothing else.
+        /// </remarks>
+        internal void TickForTests()
+        {
+            Tick();
+        }
+
         private async void Start()
         {
             _lifetime = new CancellationTokenSource();

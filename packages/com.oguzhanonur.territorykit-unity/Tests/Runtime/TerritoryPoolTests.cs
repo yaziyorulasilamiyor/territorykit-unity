@@ -220,15 +220,20 @@ namespace TerritoryKit.Unity.Tests
 
         // A gate, not just a measurement: "GC alloc ~= 0" cannot be asserted on its own, so this
         // pins a concrete per-iteration byte budget instead -- exceed it and the test goes red.
-        // Measured at exactly 0 bytes/iteration over 500 steady-state cycles (Unity 6000.1.1f1,
-        // Windows Editor): PooledTerritory/VisibleTerritory are readonly structs (no `new` per
-        // checkout), Stack<T>.Push/Pop of a reference type does not allocate, and
-        // GameObject.GetComponent<T>() is allocation-free on this Unity version. There is no
-        // async/await and no closure anywhere on Checkout()/Release(), which is usually where an
-        // "almost zero" GC budget actually goes on a hot path like this one -- there is simply
-        // nothing here that would allocate. The budget is left at the measured value rather than
-        // padded with slack, so a future change that reintroduces an allocation here fails this
-        // test instead of quietly raising the number a padded gate would have hidden.
+        //
+        // The measurement runs through AllocationMeasurement, which validates its own counter
+        // first. That matters here specifically: the first version of this gate used
+        // GC.GetAllocatedBytesForCurrentThread, which on Unity's Mono returns 0 for *every*
+        // allocation -- including a 100 KB array -- so it reported a confident
+        // "0 bytes/iteration" while measuring nothing at all.
+        //
+        // Re-measured with a counter that works: still 0 bytes/iteration over 500 steady-state
+        // cycles (Unity 6000.1.1f1, Windows Editor). PooledTerritory is a readonly struct (no
+        // `new` per checkout), Stack<T>.Push/Pop and HashSet<T>.Add/Remove of a reference type do
+        // not allocate once grown, and GetComponent<T>() is allocation-free here. There is no
+        // async/await and no closure on Checkout()/Release(). The budget is left at the measured
+        // value rather than padded, so a change that reintroduces an allocation fails this test
+        // instead of hiding inside slack.
         private const long BudgetBytesPerIteration = 0;
 
         [Test]
@@ -236,37 +241,16 @@ namespace TerritoryKit.Unity.Tests
         {
             _pool.WarmUp(8);
 
-            // Let JIT warm-up, first-call component-type caches, etc. settle before measuring --
-            // none of that is "steady state" and none of it should be charged to the budget.
-            for (int i = 0; i < 50; i++)
-            {
-                PooledTerritory warm = _pool.Checkout("warm");
-                _pool.Release(warm);
-            }
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            const int iterations = 500;
-            for (int i = 0; i < iterations; i++)
-            {
-                PooledTerritory pooled = _pool.Checkout("x");
-                _pool.Release(pooled);
-            }
-
-            long totalBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-            double perIteration = totalBytes / (double)iterations;
-
-            TestContext.Out.WriteLine(
-                $"pool checkout/release: {totalBytes} bytes over {iterations} iterations " +
-                $"= {perIteration:F2} bytes/iteration");
+            double perIteration = AllocationMeasurement.BytesPerIteration(
+                "pool checkout/release", 500, () =>
+                {
+                    PooledTerritory pooled = _pool.Checkout("x");
+                    _pool.Release(pooled);
+                });
 
             Assert.LessOrEqual(perIteration, BudgetBytesPerIteration,
-                $"steady-state checkout/release allocated {perIteration:F2} bytes/iteration " +
-                $"({totalBytes} bytes over {iterations} iterations); budget is " +
-                $"{BudgetBytesPerIteration}");
+                $"steady-state checkout/release allocated {perIteration:F2} bytes/iteration; " +
+                $"budget is {BudgetBytesPerIteration}");
         }
     }
 }
