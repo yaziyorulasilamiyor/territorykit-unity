@@ -1,6 +1,6 @@
 # Basic Map
 
-Loads a published dataset and draws every territory, seen from above.
+Streams a published dataset by camera viewport, seen from above: pan, zoom, click to highlight.
 
 ## What you need first
 
@@ -30,30 +30,42 @@ Two things that will otherwise cost you an afternoon:
 
 ## Running it
 
-Open `BasicMap.unity` and press Play. The `Territory Map` object carries a
-`TerritoryMapRenderer` with four fields worth touching:
+Open `BasicMap.unity` and press Play. The `Territory Map` object carries a `ViewportStreamer`:
 
 | Field | Default | Notes |
 |---|---|---|
 | Base Url | `http://127.0.0.1:8000` | Where the geometry API is listening |
 | Dataset Id | `tr-adm1` | Must match `--dataset-id` above |
-| Lod | `high` | `high`, `medium` or `low` |
-| Frame Camera On Load | on | Fits the camera to the dataset bounds |
+| Warm Pool Size | 96 | GameObjects/Meshes preallocated before the first tick |
+| Viewport Margin Ratio | 0.15 | Extra fraction of the visible box fetched on every side |
+| Tick Interval Seconds | 0.2 | How often the camera's view is re-checked |
+| High→Medium / Medium→Low Coarsen/Refine At | 60,000 / 45,000 / 180,000 / 140,000 | Orthographic-size hysteresis thresholds — tuned for this dataset's scale, not a universal constant |
 
-`high` is the default deliberately. Its simplification step changes nothing —
-`simplification.topologyChanged` is `false` — so if something looks wrong on screen, the cause
-is on the client side rather than in geometry the simplifier merged. 240,379 vertices across 81
-provinces is not a meaningful load for any GPU.
+The `Map Camera` object carries a `BasicMapCameraController` (sample-only, not part of the
+package): it frames the camera on the dataset once it loads, right-drag pans, the scroll wheel
+zooms between Min/Max Orthographic Size, and a left click resolves through
+`ViewportStreamer.TryPick` and recolours whatever it hits.
 
-## What it does not do
+Levels are chosen automatically as you zoom — there is no fixed Lod field to set anymore. `high`
+is where you start (closest zoom): its simplification step changes nothing —
+`simplification.topologyChanged` is `false` — so if something looks wrong on screen at that
+level, the cause is on the client side rather than in geometry the simplifier merged.
 
-Phase 4 is download, decode, draw. There is no pooling, no viewport streaming, no LOD switching
-and no click-to-select; every territory is loaded once and stays. Those arrive in Phase 5.
+## Don't drag territories in the Scene view
+
+The objects under `Territories` are pooled and positioned entirely by their mesh data — their
+local transforms are always identity, and `TerritoryPool` resets them on every checkout and
+release. Moving one with the Scene view's Move gizmo therefore achieves nothing that survives
+the next tick, and the editor's own drag maths can produce `NaN` deltas that surface as errors
+from `UnityEditor.TransformManipulator` with no runtime code involved. Pan the *camera* instead
+(right-drag in Play mode); to move the whole map, move the `Territory Map` object.
 
 ## The warning in the console
 
-On startup the scene logs the level's picking-safety verdict, and on the Turkish dataset it will
-say every level is unsafe. That is correct and not a bug in the sample: geoBoundaries
+Clicking a territory logs the level's picking-safety verdict when it is unsafe, and on the
+Turkish dataset every level is. That is correct and not a bug in the sample: geoBoundaries
 normalization drops seven real islets before simplification even begins, so no level is
-topologically identical to the source. It does not affect what you see — Phase 4 only draws —
-but it will affect Phase 5 picking. See `docs/mesh-format.md`.
+topologically identical to the source. Picking still resolves against whatever mesh is actually
+on screen — there is no "safer" level to fall back to — the log is there so the console explains
+why a click near a dropped islet's former location may resolve unexpectedly, rather than the
+click just quietly working. See `docs/mesh-format.md`.

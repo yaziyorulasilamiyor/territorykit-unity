@@ -8,7 +8,7 @@
   "samples": [
     {
       "displayName": "Basic Map",
-      "description": "Loads a published dataset and draws every territory with a top-down orthographic camera.",
+      "description": "Streams a published dataset by camera viewport: pan, zoom, and click to highlight a territory.",
       "path": "Samples~/BasicMap"
     }
   ]

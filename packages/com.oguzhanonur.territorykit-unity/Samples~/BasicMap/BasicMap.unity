@@ -145,16 +145,21 @@ MonoBehaviour:
   m_GameObject: {fileID: 315209045}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 38b7a921cb2f27f499231a54a5351ad5, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Script: {fileID: 11500000, guid: 75609f54293ec1c243f7ed336ebd7fc1, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
   baseUrl: http://127.0.0.1:8000
   datasetId: tr-adm1
-  lod: high
   targetCamera: {fileID: 596427838}
-  frameCameraOnLoad: 1
+  mapRoot: {fileID: 0}
   colourSeed: 20260818
-  loadOnStart: 1
+  warmPoolSize: 96
+  viewportMarginRatio: 0.15
+  tickIntervalSeconds: 0.2
+  highToMediumCoarsenAt: 60000
+  highToMediumRefineAt: 45000
+  mediumToLowCoarsenAt: 180000
+  mediumToLowRefineAt: 140000
 --- !u!4 &315209047
 Transform:
   m_ObjectHideFlags: 0
@@ -180,6 +185,7 @@ GameObject:
   m_Component:
   - component: {fileID: 596427839}
   - component: {fileID: 596427838}
+  - component: {fileID: 596427840}
   m_Layer: 0
   m_Name: Map Camera
   m_TagString: MainCamera
@@ -253,6 +259,23 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &596427840
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 596427837}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 653b943a3f34ac72943b21357a40f42a, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  targetCamera: {fileID: 596427838}
+  streamer: {fileID: 315209046}
+  minOrthographicSize: 5000
+  maxOrthographicSize: 800000
+  zoomSpeed: 0.15
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

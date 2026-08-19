@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import build_lod
 import check_lod_report
 import pytest
 from build_lod import RING_AREA_FLOOR, BuildLodError, normalize_geoboundaries
@@ -191,6 +192,60 @@ def test_a_document_without_features_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(BuildLodError, match="FeatureCollection"):
         normalize_geoboundaries(source, tmp_path / "n.geojson", "TR")
+
+
+# --------------------------------------------------------------------------------------------
+# main() — relative --output
+#
+# ``build_level`` runs the ``geometry_api.build`` subprocess with ``cwd=GEOMETRY_API`` so ``-m``
+# resolves regardless of install state. A relative ``--output`` that survives unresolved into
+# that call is interpreted against the subprocess's cwd, not the caller's, and the meshes land
+# under ``services/geometry-api/...`` instead of where the caller pointed. CI never caught this
+# because CI always passes an absolute ``--output``.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_relative_output_directory_is_resolved_before_the_lod_subprocess_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write(tmp_path, _feature("Ankara", {"type": "Polygon", "coordinates": [_BIG_RING]}))
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict[str, Any] = {}
+
+    def fake_import_dataset(
+        normalized: Path, output: Path, country: str, level: str, date: str
+    ) -> Path:
+        captured["import_output"] = output
+        output.mkdir(parents=True, exist_ok=True)
+        dataset = output / "dataset.json"
+        dataset.write_text("{}", encoding="utf-8")
+        return dataset
+
+    def fake_build_level(dataset: Path, output: Path, lod: str, upstream_loss: Path) -> Any:
+        captured.setdefault("build_level_outputs", []).append(output)
+        return {
+            "territoryCount": 1,
+            "totals": {"vertices": 3, "triangles": 1, "bytes": 100},
+            "simplification": {},
+            "loss": {"lossy": False},
+            "lossy": False,
+            "topologyChanged": False,
+            "pickingUnsafe": False,
+        }
+
+    monkeypatch.setattr(build_lod, "import_dataset", fake_import_dataset)
+    monkeypatch.setattr(build_lod, "build_level", fake_build_level)
+
+    exit_code = build_lod.main(["--input", str(source), "--output", "out"])
+
+    assert exit_code == 0
+    assert captured["import_output"].is_absolute()
+    assert captured["import_output"] == (tmp_path / "out" / "dataset").resolve()
+    assert len(captured["build_level_outputs"]) == len(LOD_LEVELS)
+    for lod, output in zip(LOD_LEVELS, captured["build_level_outputs"], strict=True):
+        assert output.is_absolute(), f"lod '{lod}' output {output} was not resolved"
+        assert output == (tmp_path / "out" / lod).resolve()
 
 
 # --------------------------------------------------------------------------------------------

@@ -363,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
         help="remove the output directory first so it describes exactly one run",
     )
     args = parser.parse_args(argv)
+    # `build_level` runs the geometry_api.build subprocess with cwd=GEOMETRY_API so `-m` resolves
+    # regardless of install state; a relative --output would then be interpreted against that
+    # subprocess's cwd instead of the caller's, silently writing outside the intended directory.
+    args.output = args.output.resolve()
 
     if not args.input.exists():
         print(f"error: {args.input} does not exist", file=sys.stderr)

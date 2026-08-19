@@ -46,8 +46,18 @@ go.AddComponent<MeshFilter>().sharedMesh = mesh;
 go.AddComponent<MeshRenderer>().sharedMaterial = new Material(Shader.Find("Unlit/Color"));
 ```
 
-Or drop a `TerritoryMapRenderer` on a GameObject and let it load the whole dataset. The
-**Basic Map** sample does exactly that.
+Or drop a `TerritoryMapRenderer` on a GameObject and let it load the whole dataset once, or a
+`ViewportStreamer` to pool GameObjects/meshes and stream by camera viewport instead. The
+**Basic Map** sample uses `ViewportStreamer`, with pan, zoom and click-to-highlight.
+
+## Building a player
+
+`TerritoryMapRenderer` and `ViewportStreamer` both build their material at runtime from
+`Shader.Find("Unlit/Color")`. `Shader.Find` only sees shaders the build actually included, and a
+built-in shader that no material in any scene references is stripped — so a scene that renders
+correctly in the editor can draw nothing at all in a build. Add **Unlit/Color** to *Project
+Settings → Graphics → Always Included Shaders*, or assign your own material. Both components log
+the fix and stop cleanly rather than throwing when the shader is missing.
 
 ## Coordinates
 
@@ -61,14 +71,21 @@ front-facing to a camera above.
 
 `TerritoryClient` methods are called from the main thread and complete on it. In between,
 parsing, validation and buffer preparation run on a worker thread; only the mesh buffer uploads
-come back. Nothing here caches: `UnityWebRequest` keeps no HTTP cache and ignores ETag/304, and
-because mesh URLs are pinned to an immutable revision the right answer is a revision-keyed disk
-cache rather than conditional requests. That arrives in Phase 5.
+come back. `GetMeshAsync`/`GetMeshBatchAsync` stay cache-free by design, matching how
+`UnityWebRequest` itself keeps no HTTP cache and ignores ETag/304. `GetMeshDataAsync`/
+`GetMeshDataBatchAsync` — the pair `ViewportStreamer` uses — accept an optional `MeshDiskCache`
+in the constructor instead: mesh URLs are pinned to an immutable revision, so a disk hit for a
+given revision+territory+level is valid forever and needs no conditional request to stay correct.
 
 ## Scope
 
-Phase 4 is download, decode, draw. Pooling, viewport streaming, LOD switching and click-to-select
-are Phase 5.
+Phase 4 was download, decode, draw — the whole dataset, once, via `TerritoryMapRenderer`. Phase 5
+adds pooling (`TerritoryPool`, zero steady-state GC allocation), viewport streaming
+(`ViewportStreamer`, camera-driven load/unload with LOD hysteresis), CPU-side picking
+(`TerritoryPicker`, no `MeshCollider`) and the disk cache above. `TerritoryMapRenderer` is
+unchanged and still valid for the "load everything once" case; `ViewportStreamer` is the
+streaming alternative. See `docs/phases/FAZ-5-RAPOR.md` for what was measured, including the
+scale limits of the CPU-picking design.
 
 ## Licence
 

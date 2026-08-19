@@ -25,6 +25,47 @@ namespace TerritoryKit.Unity
     /// asserts the pixels are there.
     /// </para>
     /// </remarks>
+    /// <summary>A local-metre TKMS bounding box: min/max, the same convention as the API's own bbox fields.</summary>
+    public readonly struct LocalBounds
+    {
+        public LocalBounds(float minX, float minY, float maxX, float maxY)
+        {
+            MinX = minX;
+            MinY = minY;
+            MaxX = maxX;
+            MaxY = maxY;
+        }
+
+        public float MinX { get; }
+
+        public float MinY { get; }
+
+        public float MaxX { get; }
+
+        public float MaxY { get; }
+
+        /// <summary>True when no point can satisfy both bounds — nothing hit the ground plane.</summary>
+        public bool IsEmpty => MinX > MaxX || MinY > MaxY;
+
+        /// <summary>A copy grown by <paramref name="margin"/> on every side.</summary>
+        public LocalBounds Expanded(float margin)
+        {
+            return new LocalBounds(MinX - margin, MinY - margin, MaxX + margin, MaxY + margin);
+        }
+
+        /// <summary>Whether this box and another overlap (touching edges count as intersecting).</summary>
+        public bool Intersects(LocalBounds other)
+        {
+            return MinX <= other.MaxX && MaxX >= other.MinX &&
+                   MinY <= other.MaxY && MaxY >= other.MinY;
+        }
+
+        public override string ToString()
+        {
+            return "(" + MinX + ", " + MinY + ")-(" + MaxX + ", " + MaxY + ")";
+        }
+    }
+
     public static class TerritoryMapPlacement
     {
         /// <summary>
@@ -77,6 +118,116 @@ namespace TerritoryKit.Unity
                 new Vector3(centre.x, distance, centre.z), TopDownCameraRotation);
             camera.nearClipPlane = 0.1f;
             camera.farClipPlane = distance * 2f;
+        }
+
+        /// <summary>
+        /// Intersects a world-space ray with the map's ground plane and returns the local-metre
+        /// TKMS (x, y) it lands on.
+        /// </summary>
+        /// <remarks>
+        /// The ground plane is <paramref name="mapRoot"/>'s own local XY plane — mesh vertices
+        /// are always (x, y, 0) in that space — so <c>mapRoot.forward</c> (its local +Z axis in
+        /// world space) is the plane's normal regardless of how mapRoot itself is positioned or
+        /// rotated in the scene. This does not assume <see cref="RootRotation"/> or a map sitting
+        /// at the world origin; it reads the actual transform. Shared by
+        /// <c>ViewportStreamer</c> (four viewport corners → a culling box) and
+        /// <c>TerritoryPicker</c> (one click point), so the two can never disagree about where a
+        /// screen point lands.
+        /// </remarks>
+        /// <returns>False if the ray is parallel to the plane or points away from it.</returns>
+        public static bool TryGroundPlanePoint(Transform mapRoot, Ray ray, out Vector2 local)
+        {
+            local = default;
+            if (mapRoot == null)
+            {
+                return false;
+            }
+
+            // Defensive, not a fix for any known producer: every value below comes from a
+            // Transform or a Camera, and either can be left non-finite by something outside this
+            // package (an editor tool mid-drag, a script writing a NaN position, a camera with a
+            // degenerate projection). Without these checks a single NaN propagates silently into
+            // the bbox sent to /viewport, or into a pick result, and surfaces far from its cause.
+            // Returning false instead means "this frame has no answer", which every caller
+            // already handles.
+            if (!IsFinite(ray.origin) || !IsFinite(ray.direction) ||
+                !IsFinite(mapRoot.position) || !IsFinite(mapRoot.forward))
+            {
+                return false;
+            }
+
+            var plane = new Plane(mapRoot.forward, mapRoot.position);
+            if (!plane.Raycast(ray, out float distance) || !IsFinite(distance))
+            {
+                return false;
+            }
+
+            Vector3 worldPoint = ray.GetPoint(distance);
+            Vector3 localPoint = mapRoot.InverseTransformPoint(worldPoint);
+            if (!IsFinite(localPoint))
+            {
+                return false;
+            }
+
+            local = new Vector2(localPoint.x, localPoint.y);
+            return true;
+        }
+
+        /// <summary>True when every component is a real number — not NaN and not infinite.</summary>
+        internal static bool IsFinite(Vector3 value)
+        {
+            return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+        }
+
+        internal static bool IsFinite(float value)
+        {
+            // float.IsFinite exists on .NET Standard 2.1 but not on the 2.0 profile Unity still
+            // permits, so this is spelled out rather than delegated.
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        /// <summary>
+        /// A conservative local-metre box for everything <paramref name="camera"/> can see on
+        /// the map's ground plane: the axis-aligned box around the four viewport corners'
+        /// intersections with the plane.
+        /// </summary>
+        /// <remarks>
+        /// Exact for a top-down orthographic camera. For a tilted or perspective one the visible
+        /// ground footprint is not itself axis-aligned in local space, so this deliberately
+        /// over-approximates rather than under-approximates: viewport culling would rather fetch
+        /// a few extra territories at the edge than silently miss ones that are actually on
+        /// screen. A corner ray that never reaches the plane (pointed at the sky) is skipped;
+        /// null means none of the four did.
+        /// </remarks>
+        public static LocalBounds? CameraGroundBounds(Camera camera, Transform mapRoot)
+        {
+            if (camera == null || mapRoot == null)
+            {
+                return null;
+            }
+
+            float minX = float.PositiveInfinity, minY = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
+            bool any = false;
+
+            for (int i = 0; i < 4; i++)
+            {
+                float vx = i == 1 || i == 3 ? 1f : 0f;
+                float vy = i == 2 || i == 3 ? 1f : 0f;
+                Ray ray = camera.ViewportPointToRay(new Vector3(vx, vy, 0f));
+                if (!TryGroundPlanePoint(mapRoot, ray, out Vector2 local))
+                {
+                    continue;
+                }
+
+                any = true;
+                if (local.x < minX) minX = local.x;
+                if (local.x > maxX) maxX = local.x;
+                if (local.y < minY) minY = local.y;
+                if (local.y > maxY) maxY = local.y;
+            }
+
+            return any ? new LocalBounds(minX, minY, maxX, maxY) : (LocalBounds?)null;
         }
     }
 }

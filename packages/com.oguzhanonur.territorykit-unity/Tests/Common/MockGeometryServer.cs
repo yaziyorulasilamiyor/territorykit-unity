@@ -48,6 +48,14 @@ namespace TerritoryKit.Unity.Tests
         /// <summary>JSON returned by <c>GET /v1/datasets/{id}/territories</c>, in page order.</summary>
         public List<string> TerritoryPages { get; } = new List<string>();
 
+        /// <summary>
+        /// JSON returned by <c>GET /v1/datasets/{id}/viewport</c>, in page order. Served
+        /// regardless of the requested <c>bbox</c> — this is a transport fake, not a spatial one;
+        /// callers that need "only these ids are in view" drive it by queuing the page a real
+        /// server's spatial filter would have produced for that camera position.
+        /// </summary>
+        public List<string> ViewportPages { get; } = new List<string>();
+
         /// <summary>TKMS payload per territory id, served by the single-mesh endpoint.</summary>
         public Dictionary<string, byte[]> Meshes { get; } = new Dictionary<string, byte[]>();
 
@@ -58,6 +66,21 @@ namespace TerritoryKit.Unity.Tests
         public int ForcedStatus { get; set; }
 
         public string ForcedBody { get; set; }
+
+        /// <summary>
+        /// Mirrors the real server's <c>batch_max_territories</c> (200 in
+        /// <c>geometry_api/config.py</c>): a batch asking for more distinct ids than this is
+        /// answered <c>400 batch_too_large</c> rather than served.
+        /// </summary>
+        /// <remarks>
+        /// Enforced here so a client that fails to chunk actually fails the test. Without it a
+        /// mock that happily serves any number of ids would pass whether or not the client
+        /// respects the contract the real server enforces.
+        /// </remarks>
+        public int MaxBatchTerritories { get; set; } = 200;
+
+        /// <summary>Distinct-id count of every batch request received, in order.</summary>
+        public List<int> BatchSizes { get; } = new List<int>();
 
         /// <summary>Seconds to stall every response by, for cancellation tests.</summary>
         public double DelaySeconds { get; set; }
@@ -163,6 +186,20 @@ namespace TerritoryKit.Unity.Tests
                 return;
             }
 
+            if (path.EndsWith("/viewport", StringComparison.Ordinal))
+            {
+                int page = 0;
+                string cursor = context.Request.QueryString["cursor"];
+                if (!string.IsNullOrEmpty(cursor))
+                {
+                    int.TryParse(cursor, NumberStyles.Integer, CultureInfo.InvariantCulture, out page);
+                }
+
+                WriteJson(context, 200,
+                    page < ViewportPages.Count ? ViewportPages[page] : "{\"territoryIds\":[]}");
+                return;
+            }
+
             WriteJson(context, 200, DatasetJson ?? "{}");
         }
 
@@ -189,6 +226,28 @@ namespace TerritoryKit.Unity.Tests
                         requested.Add(id);
                     }
                 }
+            }
+
+            var distinct = new List<string>();
+            foreach (string id in requested)
+            {
+                if (!distinct.Contains(id))
+                {
+                    distinct.Add(id);
+                }
+            }
+
+            lock (BatchSizes)
+            {
+                BatchSizes.Add(distinct.Count);
+            }
+
+            if (distinct.Count > MaxBatchTerritories)
+            {
+                WriteJson(context, 400,
+                    "{\"error\":{\"code\":\"batch_too_large\",\"message\":\"" + distinct.Count +
+                    " territoryIds requested, over the " + MaxBatchTerritories + " limit\"}}");
+                return;
             }
 
             var found = new Dictionary<string, byte[]>();
