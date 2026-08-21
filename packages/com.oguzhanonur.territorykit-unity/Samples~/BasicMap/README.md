@@ -4,19 +4,24 @@ Streams a published dataset by camera viewport, seen from above: pan, zoom, clic
 
 ## What you need first
 
-The scene talks to a running geometry API that has a published revision. From the repository
-root:
+The scene talks to a running geometry API that has a published revision. The root README's
+Quick Start is the canonical clean-install flow; its data/build portion, run from the repository
+root, is:
 
-```bash
-python scripts/build_lod.py --input "$PWD/services/geometry-api/data/datasets/turkey-provinces.geojson" --output "$PWD/services/geometry-api/data/build/tr-adm1" --clean
+```powershell
+.\.venv\Scripts\python.exe scripts\fetch_sample_dataset.py
+.\.venv\Scripts\python.exe scripts\build_lod.py --input "$PWD\services\geometry-api\data\datasets\turkey-provinces.geojson" --output "$PWD\services\geometry-api\data\build\tr-adm1" --clean
 ```
 
-```bash
-python scripts/publish_dataset.py --build-dir "$PWD/services/geometry-api/data/build/tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD/services/geometry-api/data/artifacts" --cache-dir "$PWD/services/geometry-api/data/cache"
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_dataset.py --build-dir "$PWD\services\geometry-api\data\build\tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD\services\geometry-api\data\artifacts" --cache-dir "$PWD\services\geometry-api\data\cache"
 ```
 
-```bash
-uvicorn geometry_api.main:app --host 127.0.0.1 --app-dir services/geometry-api/src
+The API's default paths are relative to `services/geometry-api`, so start it from that directory:
+
+```powershell
+cd services\geometry-api
+..\..\.venv\Scripts\python.exe -m uvicorn geometry_api.main:app --host 127.0.0.1 --port 8000
 ```
 
 Two things that will otherwise cost you an afternoon:

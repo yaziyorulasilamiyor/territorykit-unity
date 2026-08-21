@@ -53,36 +53,60 @@ Detaylar: [docs/mesh-format.md](docs/mesh-format.md) (TKMS binary format),
 [docs/projection.md](docs/projection.md) (WGS84 → yerel metre), [docs/api.md](docs/api.md) (HTTP
 sözleşmesi).
 
-## Hızlı başlangıç
+## Hızlı başlangıç — sıfırdan çalışan örnek
 
-```bash
-# 1) Sunucu — örnek veriyi indir, mesh üret, API'yi başlat
-python scripts/fetch_sample_dataset.py
-cd services/geometry-api
-python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes --lod high
-uvicorn geometry_api.main:app --reload   # http://localhost:8000/docs
+Bu akış Windows PowerShell içindir; clone adımından sonraki komutlar repo kökünden başlar.
+Gereksinimler: Git, Python **3.12 veya yeni**, Node.js **22 veya yeni**, internet bağlantısı ve
+örneği açmak için Unity **6000.1**. Python ve Node sürümlerini sırasıyla `python --version` ve
+`node --version` ile kontrol edin.
+
+```powershell
+# 1) Repo ve sabitlenmiş TerritoryKit submodule'u
+git clone https://github.com/yaziyorulasilamiyor/territorykit-unity.git
+cd territorykit-unity
+git submodule update --init --recursive
+
+# 2) İzole Python ortamı ve API/build bağımlılıkları
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".\services\geometry-api[dev]"
+
+# 3) Submodule'deki TerritoryKit CLI
+cd vendor\territorykit
+corepack pnpm install --config.strict-dep-builds=false
+corepack pnpm --filter "@territory-kit/cli..." build
+cd ..\..
+
+# 4) Gerçek TUR ADM1 verisi → üç LOD → doğrulanmış yayın
+.\.venv\Scripts\python.exe scripts\fetch_sample_dataset.py
+.\.venv\Scripts\python.exe scripts\build_lod.py --input "$PWD\services\geometry-api\data\datasets\turkey-provinces.geojson" --output "$PWD\services\geometry-api\data\build\tr-adm1" --clean
+.\.venv\Scripts\python.exe scripts\publish_dataset.py --build-dir "$PWD\services\geometry-api\data\build\tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD\services\geometry-api\data\artifacts" --cache-dir "$PWD\services\geometry-api\data\cache"
+
+# 5) API'yi artifacts/cache yollarının çözüldüğü dizinden başlat
+cd services\geometry-api
+..\..\.venv\Scripts\python.exe -m uvicorn geometry_api.main:app --host 127.0.0.1 --port 8000
 ```
 
-```csharp
-// 2) Unity — paketi ekle (bkz. Kurulum), sonra:
-using TerritoryKit.Unity;
+Son komut terminali meşgul bırakır; repo kökünde ikinci bir PowerShell açıp sunucuyu doğrulayın:
 
-var client = new TerritoryClient("http://127.0.0.1:8000");
-DatasetInfo dataset = await client.GetDatasetAsync("tr-adm1");
-Mesh mesh = await client.GetMeshAsync(dataset.id, dataset.revisionId, "06", "high");
-
-var root = new GameObject("Territories").transform;
-root.localRotation = TerritoryMapPlacement.RootRotation;
-var go = new GameObject("06");
-go.transform.SetParent(root, false);
-go.AddComponent<MeshFilter>().sharedMesh = mesh;
-go.AddComponent<MeshRenderer>().sharedMaterial = new Material(Shader.Find("Unlit/Color"));
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/v1/datasets
 ```
 
-Ya da bir GameObject'e `TerritoryMapRenderer` ekleyip tüm dataset'i tek seferde çizdir, ya da
-`ViewportStreamer` ile pooling + kamera viewport'una göre akış + tıkla-vurgula al — `Samples~/
-BasicMap` bunu gösteriyor. Detaylı API için
-[packages/.../README.md](packages/com.oguzhanonur.territorykit-unity/README.md).
+İkinci yanıt 81 bölgeli `tr-adm1` dataset'ini göstermelidir; bu kimlik publish komutundaki
+`--dataset-id` ile `BasicMap` örneğinin varsayılan `Dataset Id` alanının ortak değeridir.
+
+Unity'de **Window → Package Management → Package Manager → + → Add package from git URL** ile
+aşağıdaki URL'yi ekleyin, paket satırını seçip **Samples → Basic Map → Import** deyin, içe aktarılan
+`BasicMap.unity` sahnesini açın ve **Play**'e basın:
+
+```
+https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.oguzhanonur.territorykit-unity
+```
+
+Sahne `ViewportStreamer` ile kamera viewport'una göre yükleme, pooling ve tıkla-vurgulamayı
+gösterir; ayrıntılı kullanım için [paket README'sine](packages/com.oguzhanonur.territorykit-unity/README.md)
+bakın.
 
 ## Kurulum (Unity paketi)
 
