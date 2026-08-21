@@ -93,6 +93,35 @@ jobs:
             --expect-high-vertices 240379 \
             --expect-territory-count 81
 
+  unity-tests:
+    # Disabled: game-ci/unity-test-runner needs a Unity Personal license activated via the
+    # UNITY_LICENSE/UNITY_EMAIL/UNITY_PASSWORD (or UNITY_SERIAL) secrets, and this repo does not
+    # add third-party account credentials to CI on its own initiative -- that is the repo owner's
+    # call, not something decided from inside a phase. The job is written and kept in sync with
+    # the local test commands so flipping `if: false` to `if: true` and adding the secrets is the
+    # only step left. Until then, EditMode/PlayMode are run and verified locally per commit (see
+    # docs/phases/FAZ-6-RAPOR.md), the same way phases 4 and 5 did.
+    if: false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        testMode: [EditMode, PlayMode]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true
+
+      - uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: unity/TerritoryKitDev
+          testMode: ${{ matrix.testMode }}
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
   docker:
     # Not nested in the geometry-api job: that job's defaults.run.working-directory is
     # services/geometry-api, which would resolve "./services/geometry-api" below to a path that
