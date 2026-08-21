@@ -10,20 +10,34 @@ Faz 6 — sağlamlaştırma ve yayın. `v0.6.0` olarak etiketlenecek.
 ### Added
 - Hata yönetimi: sunucu kapalı (connection refused) ve aktarım sırasında bağlantı kopması için
   PlayMode testleri — bozuk veri ve iptal zaten Faz 4/5'te test edilmişti
-- CI'da devre dışı ama hazır bir `unity-tests` job'ı (`game-ci/unity-test-runner`); etkinleştirmek
-  için gereken tek şey Unity lisans secret'larının eklenmesi ve `if: false`'un kaldırılması
+- Faz 5'in ~110 KB/bölge geçici çöp tahminini ayıran altı ölçüm: TKMS decode ve Mesh.Apply 0;
+  URL 156 B, UnityWebRequest 143 B, disk-cache kopyası 32.768 B ve 50-id JSON parse 1.188 B
+- CI'da devre dışı bir `unity-tests` job taslağı (`game-ci/unity-test-runner`); job hiç
+  çalıştırılmadı, etkinleştirme lisans secret'ları ve `if: false` değişikliğinden sonra ayrıca
+  gerçek CI doğrulaması gerektiriyor
 
 ### Changed
-- README: mimari şeması, uçtan uca hızlı başlangıç, doğrulanmış (kaynağı kontrol edilmiş)
-  "Alternatifler" bölümü, güncel durum satırı
+- README: gerçek clone→publish→API→Unity örnek akışı, mimari şema ve resmi kaynaklara göre
+  düzeltilmiş "Alternatifler" bölümü
+- Unity paket sürümü faz etiketiyle eşleşecek şekilde `0.1.0` → `0.6.0`
 
 ### Fixed
-- `BasicMap` örneği Unity 6'nın varsayılan "Input System Package (New)" ayarında Play'e basar
-  basmaz `InvalidOperationException` fırlatıyordu (eski `UnityEngine.Input` API'si) — temiz bir
-  Unity projesinde yapılan UPM kurulum testi buldu, repo'nun kendi dev projesi "Input Manager
-  (Old)" seçili olduğu için hiç görünmemişti. `BasicMapCameraController` artık
-  `ENABLE_LEGACY_INPUT_MANAGER`/`ENABLE_INPUT_SYSTEM` koşullu derlemesiyle Old/New/Both'un
-  üçünde de çalışıyor, pakete Input System bağımlılığı eklemeden
+- `BasicMap` örneğinin Unity 6 New-only ayarında eski `UnityEngine.Input` yüzünden fırlatması;
+  Old/New/Both koşullu yolları eklendi ve varsayılan normalize scroll ile ham Windows scroll'u
+  eşitlendi, ancak New-only yalnız derlendi ve davranış doğrulamasını kullanıcı Unity'de yapacak
+
+### Known limitations
+- Unity `MeshDiskCache` için toplam boyut/tahliye sınırı yok; istemci TKMB
+  `entryEncoding: gzip` girdilerini okumuyor
+- Tekrarlanan cursor'a karşı istemci koruması yok; gerçek ADM2/ADM3 ve toplam Unity/GPU belleği
+  ölçülmedi
+- Desteklenen/test edilen Unity tabanı 6000.1; 2022.3 uyumluluğu doğrulanmadı ve manifestçe
+  ilan edilmiyor
+- Unity CI job'ı devre dışı ve hiç çalıştırılmadı
+- `TerritoryMapRenderer` bütün id'leri tek batch'e koyduğu için 200'den büyük dataset'lerde API'nin
+  200 benzersiz-ID sınırını aşar; `ViewportStreamer` aynı sınırda parçalama yapar
+- Streaming geçici tahsisinin ~33 KB'ı ayrıştırıldı; kalan ~77 KB Task/async ve gerçek ağ yolunda
+  ölçülmedi
 
 ## [0.5.0] - 2026-08-19 (Faz 5 — havuzlama, viewport streaming, seçim)
 
@@ -52,8 +66,9 @@ Faz 6 — sağlamlaştırma ve yayın. `v0.6.0` olarak etiketlenecek.
 
 ### Added
 - `TkmsHeader` + `MeshDecoder`: worker thread'de tam doğrulama, ana thread'de yalnız Mesh çağrıları
-- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` ile kopyasız
-  okuma, gerçek `Abort()` iptali, `LodPolicy`, `TerritoryMapPlacement`
+- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` üzerinden
+  handler buffer'ına tahsissiz erişip sahipli `NativeArray`'e tek kopya, gerçek `Abort()` iptali,
+  `LodPolicy`, `TerritoryMapPlacement`
 - `TerritoryMapRenderer` + `Samples~/BasicMap` (81 il, tek batch); `capture_sample.ps1`,
   `check_lod_report.py` CI sentinel'i
 
