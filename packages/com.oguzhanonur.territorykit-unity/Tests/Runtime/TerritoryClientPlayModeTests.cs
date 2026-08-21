@@ -195,6 +195,64 @@ namespace TerritoryKit.Unity.Tests
         }
 
         [UnityTest]
+        public IEnumerator ServerDownReportsAConnectionErrorInsteadOfHanging()
+        {
+            // A closed port on localhost: connection refused, not a timeout and not a 404 --
+            // nothing is listening, so this must fail fast through UnityWebRequest's own
+            // connection-error path rather than TerritoryApiException's protocol-error one.
+            int deadPort = FindFreeTcpPort();
+            var deadClient = new TerritoryClient("http://127.0.0.1:" + deadPort)
+            {
+                TimeoutSeconds = 5
+            };
+
+            Task<DatasetInfo> task = deadClient.GetDatasetAsync("tr-adm1");
+
+            float deadline = Time.realtimeSinceStartup + 10f;
+            while (!task.IsCompleted && Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            Assert.IsTrue(task.IsCompleted, "connection refused must fail, not hang forever");
+            Assert.IsTrue(task.IsFaulted);
+            var error = task.Exception.InnerException as TerritoryApiException;
+            Assert.IsNotNull(error,
+                "a refused connection must surface as TerritoryApiException, not an unhandled " +
+                "network exception: " + (task.Exception.InnerException?.GetType().Name ?? "null"));
+        }
+
+        [UnityTest]
+        public IEnumerator NetworkDropMidTransferFailsCleanlyInsteadOfDecodingGarbage()
+        {
+            // Distinct from ReportsCorruptPayloadsAsFormatErrors: that test gets a complete,
+            // well-formed-looking response with wrong bytes. This one gets the connection itself
+            // severed partway through a real payload -- the failure has to come from the
+            // transport (an incomplete download), not from the decoder guessing at partial data.
+            byte[] full = TkmsFixture.Quad();
+            _server.Meshes["06"] = full;
+            _server.TruncateResponseAtBytes = full.Length / 2;
+
+            Task<Mesh> task = _client.GetMeshAsync("tr-adm1", "abc123", "06", "high");
+            yield return WaitForCompletion(task);
+
+            Assert.IsTrue(task.IsFaulted, "a severed connection must not silently succeed");
+            Exception failure = task.Exception.InnerException;
+            Assert.IsFalse(failure is NullReferenceException || failure is IndexOutOfRangeException,
+                "a dropped connection must fail as a reported error, not crash the caller: " +
+                failure);
+        }
+
+        private static int FindFreeTcpPort()
+        {
+            var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            probe.Start();
+            int port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            return port;
+        }
+
+        [UnityTest]
         public IEnumerator CancellationAbortsTheRequestInsteadOfWaitingForIt()
         {
             _server.DelaySeconds = 5;
