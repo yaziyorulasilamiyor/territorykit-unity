@@ -6,9 +6,8 @@ dependencies.
 
 ## Requirements
 
-Built and tested against **Unity 6000.1**. The code avoids APIs newer than Unity 2022.3 on
-purpose, so 2022.3 LTS is the intended floor — but no 2022.3 install has run these tests, so
-that is an intent and not a verified claim. `package.json` states the version actually tested.
+Built and tested against **Unity 6000.1**, which is also the package manifest's supported floor.
+Unity 2022.3 compatibility has not been verified and is not claimed by this package.
 
 ## Installation
 
@@ -35,20 +34,24 @@ var client = new TerritoryClient("http://127.0.0.1:8000");
 DatasetInfo dataset = await client.GetDatasetAsync("tr-adm1");
 Debug.Log(LodPolicy.Describe(dataset, "high"));
 
-Mesh mesh = await client.GetMeshAsync(dataset.id, dataset.revisionId, "06", "high");
+// Kırklareli in the pinned TUR ADM1 sample dataset.
+const string territoryId = "tr:adm1:25984515b10334298996421-73296f27";
+Mesh mesh = await client.GetMeshAsync(dataset.id, dataset.revisionId, territoryId, "high");
 
 var root = new GameObject("Territories").transform;
 root.localRotation = TerritoryMapPlacement.RootRotation;   // lays local XY flat into world XZ
 
-var go = new GameObject("06");
+var go = new GameObject(territoryId);
 go.transform.SetParent(root, false);
 go.AddComponent<MeshFilter>().sharedMesh = mesh;
 go.AddComponent<MeshRenderer>().sharedMaterial = new Material(Shader.Find("Unlit/Color"));
 ```
 
-Or drop a `TerritoryMapRenderer` on a GameObject and let it load the whole dataset once, or a
-`ViewportStreamer` to pool GameObjects/meshes and stream by camera viewport instead. The
-**Basic Map** sample uses `ViewportStreamer`, with pan, zoom and click-to-highlight.
+Or drop a `TerritoryMapRenderer` on a GameObject to load a dataset of at most 200 territories
+once, or a `ViewportStreamer` to pool GameObjects/meshes and stream by camera viewport instead.
+The renderer currently sends one batch and the API rejects more than 200 unique IDs; the
+streamer chunks requests at that boundary. The **Basic Map** sample uses `ViewportStreamer`, with
+pan, zoom and click-to-highlight.
 
 ## Building a player
 
@@ -74,18 +77,19 @@ parsing, validation and buffer preparation run on a worker thread; only the mesh
 come back. `GetMeshAsync`/`GetMeshBatchAsync` stay cache-free by design, matching how
 `UnityWebRequest` itself keeps no HTTP cache and ignores ETag/304. `GetMeshDataAsync`/
 `GetMeshDataBatchAsync` — the pair `ViewportStreamer` uses — accept an optional `MeshDiskCache`
-in the constructor instead: mesh URLs are pinned to an immutable revision, so a disk hit for a
-given revision+territory+level is valid forever and needs no conditional request to stay correct.
+in the constructor instead: mesh URLs are pinned to an immutable revision, so a local disk hit
+remains byte-valid while that cache file exists, even if the server later prunes the revision;
+it needs no conditional request to stay correct.
 
 ## Scope
 
-Phase 4 was download, decode, draw — the whole dataset, once, via `TerritoryMapRenderer`. Phase 5
-adds pooling (`TerritoryPool`, zero steady-state GC allocation), viewport streaming
+Phase 4 was download, decode, draw — up to 200 territories once via `TerritoryMapRenderer`.
+Phase 5 adds pooling (`TerritoryPool`, zero steady-state GC allocation), viewport streaming
 (`ViewportStreamer`, camera-driven load/unload with LOD hysteresis), CPU-side picking
 (`TerritoryPicker`, no `MeshCollider`) and the disk cache above. `TerritoryMapRenderer` is
-unchanged and still valid for the "load everything once" case; `ViewportStreamer` is the
-streaming alternative. See `docs/phases/FAZ-5-RAPOR.md` for what was measured, including the
-scale limits of the CPU-picking design.
+unchanged and is valid only while the dataset fits the API's 200-ID batch contract;
+`ViewportStreamer` is the chunked streaming alternative. See `docs/phases/FAZ-5-RAPOR.md` for
+what was measured, including the scale limits of the CPU-picking design.
 
 ## Licence
 

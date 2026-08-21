@@ -45,7 +45,8 @@ Sonuç dürüstçe: **duran kamera ve havuz sıfır tahsis; streaming değil.** 
 - LOD histerezis eşikleri (60k/45k/180k/140k) bu sahnenin ölçeğine göre; doğrulanmış evrensel sabit değil.
 - FPS vsync'e takılı: 60,0 bir taban. `vSyncCount=0` + `targetFrameRate` ikisi birden verilmesine rağmen D3D12 swap chain sınırladı; gerçek başlık boşluğu ölçülmedi.
 - LOD değişiminde tik kısa süre iki kat slot tutuyor (hazırla-sonra-bırak sırasının bedeli); havuz bir kez ~2× büyüyebilir.
-- Disk cache eviction/limit yok; TKMB `entryEncoding: gzip` okunmuyor; 2022.3 LTS hiç çalıştırılmadı (son ikisi Faz 4'ten devrediyor).
+- Disk cache eviction/limit yok; TKMB `entryEncoding: gzip` okunmuyor; 2022.3 hiç çalıştırılmadı
+  ve paket manifestinin desteklenen tabanı değil (son ikisi Faz 4'ten devrediyor).
 
 ## Tıkanmalar
 Yok. İnceleme "NaN hatası" engelleyicisi tam stack trace ile `UnityEditor.TransformManipulator.SetPositionDelta`'ya — Editor'ün kendi Move gizmo'suna — bağlandı; izde runtime kodumuz yok, **ürün hatası değil**. Yine de bağımsız gerekçeyle iki şey yapıldı: havuz transform'u sıfırlıyor ve kamera/ray matematiği sonlu olmayan değerleri reddediyor. Örnek sahne README'sinde bölge nesnelerinin kodla konumlandığı, Scene view'da Move aracıyla taşınmaması gerektiği yazılı.
@@ -54,7 +55,7 @@ Yok. İnceleme "NaN hatası" engelleyicisi tam stack trace ile `UnityEditor.Tran
 Gerçek ADM2/ADM3 bellek ölçümü (52,1 KB ADM1'den kaba projeksiyon; Unity/GPU toplam belleği değil) · cache eviction/disk limiti · tekrarlanan cursor koruması.
 
 ## Sonraki faza hazırlık
-Faz 6 için önkoşul hazır. Devreden: yukarıdaki üç madde, 2022.3 doğrulaması, TKMB gzip.
+Faz 6 için önkoşul hazır. Devreden: yukarıdaki üç madde, 2022.3 uyumluluk belirsizliği, TKMB gzip.
 
 ## Değişen dosyalar
 - `Runtime/`: `TerritoryPool`, `ViewportStreamer`, `TerritoryPicker`, `LodHysteresis`, `MeshDiskCache` (yeni); `TerritoryClient`, `TerritoryMapPlacement`, `TerritoryMapRenderer` (güncellendi)

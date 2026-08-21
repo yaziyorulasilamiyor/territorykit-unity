@@ -4,29 +4,32 @@ Streams a published dataset by camera viewport, seen from above: pan, zoom, clic
 
 ## What you need first
 
-The scene talks to a running geometry API that has a published revision. From the repository
-root:
+The scene talks to a running geometry API that has a published revision. The root README's
+Quick Start is the canonical clean-install flow; its data/build portion, run from the repository
+root, is:
 
-```bash
-python scripts/build_lod.py --input "$PWD/services/geometry-api/data/datasets/turkey-provinces.geojson" --output "$PWD/services/geometry-api/data/build/tr-adm1" --clean
+```powershell
+.\.venv\Scripts\python.exe scripts\fetch_sample_dataset.py
+.\.venv\Scripts\python.exe scripts\build_lod.py --input "$PWD\services\geometry-api\data\datasets\turkey-provinces.geojson" --output "$PWD\services\geometry-api\data\build\tr-adm1" --clean
 ```
 
-```bash
-python scripts/publish_dataset.py --build-dir "$PWD/services/geometry-api/data/build/tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD/services/geometry-api/data/artifacts" --cache-dir "$PWD/services/geometry-api/data/cache"
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_dataset.py --build-dir "$PWD\services\geometry-api\data\build\tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD\services\geometry-api\data\artifacts" --cache-dir "$PWD\services\geometry-api\data\cache"
 ```
 
-```bash
-uvicorn geometry_api.main:app --host 127.0.0.1 --app-dir services/geometry-api/src
+The API's default paths are relative to `services/geometry-api`, so start it from that directory:
+
+```powershell
+cd services\geometry-api
+..\..\.venv\Scripts\python.exe -m uvicorn geometry_api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Two things that will otherwise cost you an afternoon:
+One thing that will otherwise cost you an afternoon:
 
 - **Use `127.0.0.1`, not `localhost`** — in the command above and in the scene's Base Url. On
   Windows `localhost` resolves to the IPv6 `::1` first, while uvicorn binds IPv4 only, so the
   request fails against a server that is up and serving. `scripts/capture_sample.ps1` hit exactly
   this.
-- **Pass absolute paths to `build_lod.py`.** It runs part of the chain in a subprocess with a
-  different working directory, so a relative `--output` resolves against the wrong root.
 
 ## Running it
 
@@ -46,10 +49,17 @@ package): it frames the camera on the dataset once it loads, right-drag pans, th
 zooms between Min/Max Orthographic Size, and a left click resolves through
 `ViewportStreamer.TryPick` and recolours whatever it hits.
 
+**Input backend:** carries separate `ENABLE_LEGACY_INPUT_MANAGER`/`ENABLE_INPUT_SYSTEM` paths
+without adding an Input System dependency. New-only compiles and the full suite passes under
+Both; New-only pan/zoom/click behavior still awaits the release's manual Unity check. If a
+project somehow has neither backend active, pan/zoom/click are disabled after one console warning
+and the map still renders.
+
 Levels are chosen automatically as you zoom — there is no fixed Lod field to set anymore. `high`
-is where you start (closest zoom): its simplification step changes nothing —
-`simplification.topologyChanged` is `false` — so if something looks wrong on screen at that
-level, the cause is on the client side rather than in geometry the simplifier merged.
+is where you start (closest zoom): it reduces boundary vertices without changing the post-
+normalization part/hole structure (`simplification.topologyChanged` is `false`). The upstream
+normalization still drops seven tiny islets, so `high` is not lossless or universally safe for
+picking; inspect the dataset metadata when exact source coverage matters.
 
 ## Don't drag territories in the Scene view
 

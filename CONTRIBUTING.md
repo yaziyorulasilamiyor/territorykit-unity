@@ -73,6 +73,27 @@ pytest
 
 Üçü de geçmeden commit atılmaz.
 
+### Commit atmadan önce (Unity paketi değişikliklerinde)
+
+CI'da Unity job'ı devre dışı (bkz. `.github/workflows/ci.yml` — `unity-tests`, `if: false`); üçüncü
+taraf bir hesabın kimlik bilgilerini (`UNITY_LICENSE`/`UNITY_EMAIL`/`UNITY_PASSWORD`) reponun
+secret'larına eklemek repo sahibinin kararı, bir fazın içinden verilmiyor. Bu yüzden EditMode ve
+PlayMode testleri **her commit öncesi elle** çalıştırılır:
+
+```bash
+"C:\Program Files\Unity\Hub\Editor\6000.1.1f1\Editor\Unity.exe" ^
+  -batchmode -nographics -runTests -testPlatform EditMode ^
+  -projectPath unity\TerritoryKitDev -testResults editmode-results.xml -logFile editmode.log
+
+"C:\Program Files\Unity\Hub\Editor\6000.1.1f1\Editor\Unity.exe" ^
+  -batchmode -runTests -testPlatform PlayMode ^
+  -projectPath unity\TerritoryKitDev -testResults playmode-results.xml -logFile playmode.log
+```
+
+PlayMode `-nographics` ile kırılıyor (render testleri gerçek bir grafik cihazı istiyor), o yüzden
+EditMode'dan farklı olarak bayraksız çalıştırılır. Sonuç XML'lerinde `result="Failed"` aranır;
+ikisi de `.gitignore`'da, commit edilmez.
+
 ## Faz sonu akışı
 
 1. Rapor dosyasını yaz → `docs: add phase N report` (ayrı commit)

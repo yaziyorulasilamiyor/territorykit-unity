@@ -17,10 +17,14 @@ sadeleştirilen sınırın iki yanı aynı sayılar. Paylaşılan vertex bit-eş
 
 | Seviye | Vertex | high'ın %'si | Üçgen | Parça | Delik | Korunan alan | En kötü parça | Birleşmenin eklediği |
 |---|---|---|---|---|---|---|---|---|
-| kaynak | 366.157 | — | — | 705 | 0 | — | — | — |
+| normalize sadeleştirme girdisi¹ | 366.157 | — | — | 705 | 0 | — | — | — |
 | high | 240.379 | %100 | 238.969 | 705 | 0 | %99,9994 | %53,9 | 0 km² |
 | medium | 85.926 | %35,7 | 84.518 | 704 | 0 | %99,982 | %15,6 | 15,9 km² |
 | low | 30.753 | **%12,8** | 29.383 | 685 | 0 | %99,842 | %15,6 | 269,8 km² |
+
+¹ Normalizasyon yedi küçük adacığı düşürür; 366.157 kalan 705 kapalı ring'in kapanış
+koordinatlarını da sayar, Faz 1'in 365.481 kapanış tekrarı çıkarılmış ham TKMS vertex'iyle aynı
+ölçüm değildir.
 
 ## Kararlar ve gerekçeleri
 1. **Sadeleştirme TerritoryKit yerine topojson** — önce denendi, sonra ölçüldü: her ring'i bağımsız Douglas-Peucker'dan
@@ -46,7 +50,8 @@ bir şey söylemez. Tam tanım `docs/mesh-format.md`'de.
 
 **Sonuç, sessiz kalmasın diye:** gerçek TUR ADM1 zincirinde artık **hiçbir seviye seçim için güvenli değil** — üçü de
 `pickingUnsafe:true`. `high`'ın tek sebebi normalizasyonun attığı **7 adacık** (İstanbul 5, Muğla 2; 2,0–6,1 m²); kendi
-sadeleştirmesi tertemiz ve bunu `simplification.topologyChanged:false` söylüyor. 4. turun "kanıtlanmış tek güvenli
+sadeleştirmesi sınır vertex'lerini azaltıyor ama yapısal değişiklik üretmiyor ve bunu
+`simplification.topologyChanged:false` söylüyor. 4. turun "kanıtlanmış tek güvenli
 seviye `high`" cümlesi **daraltıldı**: güvenli seçim, normalizasyonun bu 7 adacığı atmayı bırakmasını gerektiriyor.
 
 ## Bilinen eksikler ve riskler

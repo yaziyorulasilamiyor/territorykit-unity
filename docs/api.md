@@ -46,6 +46,11 @@ parçasıdır, "güncel" takma adı yoktur — artifact URL'leri her zaman kanon
 - TKMB konteynerinin `entryEncoding`'i (`identity`/`gzip`) ayrı bir kavramdır, `Accept-Encoding`
   header'ından **türetilmez** — istek gövdesinde açık bir alan (bkz.
   [mesh-format.md](mesh-format.md)).
+- Batch istek gövdesi
+  `{"territoryIds":["id-a","id-b"],"lod":"high","entryEncoding":"identity"}` biçimindedir;
+  `territoryIds` boş olamaz, tekrarlar tekilleştirilir ve dağıtılan varsayılan sözleşme en fazla
+  **200 benzersiz id** kabul eder (`>200` → `400 batch_too_large`). Bulunamayan id'ler HTTP 404
+  yerine TKMB'nin `missing` tablosunda döner; `entryEncoding` yalnız `identity` veya `gzip`'tir.
 
 ## Bilinmeyen/silinmiş revizyon
 

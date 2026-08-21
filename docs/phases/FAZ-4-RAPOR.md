@@ -6,7 +6,8 @@ Dal: feat/phase-4-unity-render · Commit sayısı: 20
 ## Ne yapıldı
 - `TkmsHeader` + `MeshDecoder`: worker thread'de tam doğrulama (sonlu koordinat, index aralığı, bbox'ın
   **gerçek** vertex sınırlarına eşitliği); ana thread'de yalnız 4 Mesh çağrısı + 2 kopya
-- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` ile kopyasız okuma,
+- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` ile handler
+  buffer'ına tahsissiz erişim ve istek kapanmadan önce sahipli `NativeArray`'e tek açık kopya,
   `Abort()` ile gerçek iptal, cache **yok** (Karar 3). `LodPolicy` bayrakları yorumlar ama **seçim
   yapmaz**; `TerritoryMapPlacement` yerleştirme ve kamera yönünü tek yerde tutar
 - `TerritoryMapRenderer` + `Samples~/BasicMap` (81 il, tek batch); `capture_sample.ps1` ile uvicorn →
@@ -43,13 +44,13 @@ kodda da geçerdi — iki hatanın ilk turda hayatta kalma sebebi bu.
 1. **Vertex'ler 3 float'a genişletiliyor, 2'ye değil** — ölçüldü: `Float32 × 2` pozisyon D3D12'de kabul
    edildi ve aynı kaplamayla render etti (%39,06). Reddedildi: cihaz bağımlı, Faz 5'in
    `MeshCollider`'ını test edilmemiş zemine koyar, kazancı da worker thread'deydi.
-2. **`package.json` fiilen test edilen sürümü yazıyor (`6000.1`)** — makinede 2022.3 yok; manifest
-   iddia dosyasıdır. 2023+ API kullanılmadı; 2022.3 hedefi README'de **ayrı ve doğrulanmamış**.
+2. **`package.json` desteklenen/test edilen tabanı yazıyor (`6000.1`)** — 2022.3 çalıştırılmadı ve
+   güncel README o sürüm için uyumluluk iddia etmiyor.
 3. **Faz 4'te cache yok; Faz 5 revizyon-anahtarlı disk cache'i kullanacak** — `UnityWebRequest`'in C#
    kaynağında cache yok, `Caching` yalnız AssetBundle için, ETag/304 işlenmiyor; URL'ler zaten değişmez.
 
 ## Bilinen eksikler ve riskler
-- **2022.3 hiç çalıştırılmadı**; kod 2023+ API içermiyor ama bu doğrulanmamış bir uyumluluktur.
+- **2022.3 hiç çalıştırılmadı** ve manifest 6000.1 istediği için desteklenen taban değildir.
 - **`build_lod.py` göreli `--output` ile kırılıyor** (Faz 2 kodu): alt süreç `cwd`'yi değiştiriyor; CI
   mutlak yol geçtiği için yeşil kalıyor — sessiz bir tuzak. Düzeltmesi `args.output.resolve()` kadar.
 - **Unity CI job'ı yok** (Faz 6). **TKMB `entryEncoding: gzip` okunmuyor** — gzip'li konteyner net

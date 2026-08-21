@@ -85,6 +85,13 @@ namespace TerritoryKit.Unity.Tests
         /// <summary>Seconds to stall every response by, for cancellation tests.</summary>
         public double DelaySeconds { get; set; }
 
+        /// <summary>
+        /// If set, a binary response (mesh or batch) writes only this many bytes and then aborts
+        /// the connection instead of closing it normally — a network drop mid-transfer, as
+        /// opposed to a clean error response or a slow-but-complete one.
+        /// </summary>
+        public int? TruncateResponseAtBytes { get; set; }
+
         private static int FindFreePort()
         {
             var probe = new TcpListener(IPAddress.Loopback, 0);
@@ -161,7 +168,7 @@ namespace TerritoryKit.Unity.Tests
                 string territoryId = Uri.UnescapeDataString(path.Substring(meshIndex + "/mesh/".Length));
                 if (Meshes.TryGetValue(territoryId, out byte[] payload))
                 {
-                    WriteBytes(context, 200, payload);
+                    WriteBytes(context, 200, payload, TruncateResponseAtBytes);
                 }
                 else
                 {
@@ -264,7 +271,7 @@ namespace TerritoryKit.Unity.Tests
                 }
             }
 
-            WriteBytes(context, 200, TkmbFixture.Build(found, missing));
+            WriteBytes(context, 200, TkmbFixture.Build(found, missing), TruncateResponseAtBytes);
         }
 
         private static void WriteJson(HttpListenerContext context, int status, string json)
@@ -277,11 +284,24 @@ namespace TerritoryKit.Unity.Tests
             context.Response.Close();
         }
 
-        private static void WriteBytes(HttpListenerContext context, int status, byte[] bytes)
+        private static void WriteBytes(HttpListenerContext context, int status, byte[] bytes,
+            int? truncateAtBytes = null)
         {
             context.Response.StatusCode = status;
             context.Response.ContentType = "application/octet-stream";
             context.Response.ContentLength64 = bytes.Length;
+
+            if (truncateAtBytes.HasValue && truncateAtBytes.Value < bytes.Length)
+            {
+                // Promise the full Content-Length, deliver less, then kill the connection
+                // outright. Close() would still send a well-formed (short) body; Abort() is what
+                // a severed network link actually looks like to the client.
+                context.Response.OutputStream.Write(bytes, 0, truncateAtBytes.Value);
+                context.Response.OutputStream.Flush();
+                context.Response.Abort();
+                return;
+            }
+
             context.Response.OutputStream.Write(bytes, 0, bytes.Length);
             context.Response.Close();
         }

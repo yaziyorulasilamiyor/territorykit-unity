@@ -54,3 +54,9 @@ unity/TerritoryKitDev-ci/
 unity/BenchmarkBuild/
 benchmark-result.txt
 unity/TerritoryKitDev/Assets/Benchmark/BenchmarkScene.unity*
+
+# Manual Unity test runs (CONTRIBUTING.md — CI's unity-tests job is disabled)
+*-results.xml
+editmode.log
+playmode.log
+unity/TerritoryKitDev/Assets/InitTestScene*.unity*

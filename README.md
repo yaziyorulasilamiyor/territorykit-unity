@@ -4,7 +4,128 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 [TerritoryKit](https://github.com/mberatkaya/TerritoryKit) açık kaynak geospatial SDK'sının
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
-> Durum: Erken geliştirme (Faz 3 tamamlandı — HTTP API ve cache). Henüz kullanılabilir bir sürüm yok.
+> Durum: Erken sürüm `v0.6.0` — sunucu build/yayın zinciri ile Unity render, pooling, viewport
+> streaming ve seçim kapsamı tamamlandı; aşağıdaki bilinen sınırlar geçerlidir.
+
+![Örnek sahne — Türkiye il sınırları Unity'de](docs/phases/faz-4-ornek-sahne.png)
+
+## Ne yapıyor, neden var
+
+TerritoryKit poligon "bölgeler" için lookup, hiyerarşi, komşuluk ve viewport tabanlı yükleme
+sağlıyor ama üç renderer adaptörü de (MapLibre, Leaflet, OpenLayers) web'e özel — hiçbir oyun
+motoru entegrasyonu yok. Bu proje o boşluğu dolduruyor: bölge poligonlarını sunucu tarafında
+üçgenler + LOD üretir, Unity tarafı bunları indirir, `Mesh`'e çevirir, havuzlar ve kamera
+viewport'una göre akıtır.
+
+**Neden ağır iş sunucuda?** Triangülasyon ve topoloji-güvenli basitleştirme CPU-yoğun. Mobil
+cihazda her açılışta yapmak pil ve süre israfı; sunucuda bir kez hesaplanır ve revizyonlu URL
+yaşadığı sürece immutable servis edilir. Sunucu varsayılan olarak son üç revizyonu tutar; eski
+revizyonlar budanabilir (bkz. [docs/api.md](docs/api.md)).
+
+| Bileşen | Ne yapar |
+|---|---|
+| `services/geometry-api` (Python/FastAPI) | Bölge poligonlarını sunucu tarafında üçgenler, LOD üretir, binary mesh (TKMS) olarak servis eder |
+| `packages/com.oguzhanonur.territorykit-unity` (C#/UPM) | Bu mesh'leri indirir, Unity `Mesh` nesnesine çevirir, havuzlar, viewport'a göre yükler/boşaltır, tıklamayı bölgeye eşler |
+
+## Mimari
+
+```
+GeoJSON (geoBoundaries)
+   │  territory import geoboundaries (vendor/territorykit CLI)
+   ▼
+dataset.json ──► paylaşılan-arc sadeleştirmesi (topojson, high/medium/low)
+   │
+   ▼
+geometry-api build (earcut triangülasyon, WGS84→yerel metre projeksiyon)
+   │
+   ▼
+TKMS mesh dosyaları × 3 LOD  ──►  FastAPI (/v1/datasets/.../mesh, .../viewport)
+                                        │  UnityWebRequest, TKMB batch
+                                        ▼
+                          Unity: MeshDecoder → TerritoryPool → ViewportStreamer
+                                        │
+                                        ▼
+                    Kamera viewport'una göre yüklenen/boşalan bölge Mesh'leri,
+                    CPU nokta-üçgen picking, MaterialPropertyBlock renklendirme
+```
+
+Detaylar: [docs/mesh-format.md](docs/mesh-format.md) (TKMS binary format),
+[docs/projection.md](docs/projection.md) (WGS84 → yerel metre), [docs/api.md](docs/api.md) (HTTP
+sözleşmesi).
+
+## Hızlı başlangıç — sıfırdan çalışan örnek
+
+Bu akış Windows PowerShell içindir; clone adımından sonraki komutlar repo kökünden başlar.
+Gereksinimler: Git, Python **3.12 veya yeni**, Node.js **22 veya yeni**, internet bağlantısı ve
+örneği açmak için Unity **6000.1**. Python ve Node sürümlerini sırasıyla `python --version` ve
+`node --version` ile kontrol edin.
+
+```powershell
+# 1) Repo ve sabitlenmiş TerritoryKit submodule'u
+git clone https://github.com/yaziyorulasilamiyor/territorykit-unity.git
+cd territorykit-unity
+git submodule update --init --recursive
+
+# 2) İzole Python ortamı ve API/build bağımlılıkları
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".\services\geometry-api[dev]"
+
+# 3) Submodule'deki TerritoryKit CLI
+cd vendor\territorykit
+corepack pnpm install --config.strict-dep-builds=false
+corepack pnpm --filter "@territory-kit/cli..." build
+cd ..\..
+
+# 4) Gerçek TUR ADM1 verisi → üç LOD → doğrulanmış yayın
+.\.venv\Scripts\python.exe scripts\fetch_sample_dataset.py
+.\.venv\Scripts\python.exe scripts\build_lod.py --input "$PWD\services\geometry-api\data\datasets\turkey-provinces.geojson" --output "$PWD\services\geometry-api\data\build\tr-adm1" --clean
+.\.venv\Scripts\python.exe scripts\publish_dataset.py --build-dir "$PWD\services\geometry-api\data\build\tr-adm1" --dataset-id tr-adm1 --artifacts-dir "$PWD\services\geometry-api\data\artifacts" --cache-dir "$PWD\services\geometry-api\data\cache"
+
+# 5) API'yi artifacts/cache yollarının çözüldüğü dizinden başlat
+cd services\geometry-api
+..\..\.venv\Scripts\python.exe -m uvicorn geometry_api.main:app --host 127.0.0.1 --port 8000
+```
+
+Son komut terminali meşgul bırakır; repo kökünde ikinci bir PowerShell açıp sunucuyu doğrulayın:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/v1/datasets
+```
+
+İkinci yanıt 81 bölgeli `tr-adm1` dataset'ini göstermelidir; bu kimlik publish komutundaki
+`--dataset-id` ile `BasicMap` örneğinin varsayılan `Dataset Id` alanının ortak değeridir.
+
+Unity'de **Window → Package Management → Package Manager → + → Add package from git URL** ile
+aşağıdaki URL'yi ekleyin, paket satırını seçip **Samples → Basic Map → Import** deyin, içe aktarılan
+`BasicMap.unity` sahnesini açın ve **Play**'e basın:
+
+```
+https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.oguzhanonur.territorykit-unity
+```
+
+Sahne `ViewportStreamer` ile kamera viewport'una göre yükleme, pooling ve tıkla-vurgulamayı
+gösterir; ayrıntılı kullanım için [paket README'sine](packages/com.oguzhanonur.territorykit-unity/README.md)
+bakın.
+
+## Kurulum (Unity paketi)
+
+**Gereksinim:** Paket manifestinin desteklediği ve test edilen taban Unity **6000.1**'dir;
+2022.3 uyumluluğu doğrulanmamıştır ve paket manifesti o sürümde kurulumu desteklediğini söylemez.
+
+Package Manager → **Add package from git URL**:
+
+```
+https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.oguzhanonur.territorykit-unity
+```
+
+Build alırken `Shader.Find("Unlit/Color")` stripping'e takılabilir — bkz. paket README'sindeki
+[Building a player](packages/com.oguzhanonur.territorykit-unity/README.md#building-a-player).
+
+**Örnek sahnenin input backend'i:** `BasicMap`, pakete Input System bağımlılığı eklemeden Old/New/
+Both için ayrı koşullu derleme yolları taşır. New-only temiz derlendi; tam EditMode/PlayMode suite'i
+Both altında geçti, New-only pan/zoom/tıklama davranışının manuel Unity doğrulaması bekleniyor
+(bkz. `docs/phases/FAZ-6-RAPOR.md`).
 
 ## LOD üretimi (Faz 2)
 
@@ -37,52 +158,59 @@ corepack pnpm --filter "@territory-kit/cli..." build
 - `corepack enable` Windows'ta `C:\Program Files\nodejs` altına yazamayıp `EPERM` verebilir.
   Gerek yok — `corepack pnpm ...` doğrudan çalışır.
 - pnpm, `@scarf/scarf` (telemetri) paketinin install script'ini bloklayıp `ERR_PNPM_IGNORED_BUILDS`
-  ile çıkış kodu 1 döner. Script'i **onaylamayın**; `pnpm config set strict-dep-builds false`
-  ile uyarıyı hataya çevirmeyi kapatın. Paket yine çalıştırılmaz.
+  ile çıkış kodu 1 döner. Script'i **onaylamayın**; hızlı başlangıçtaki
+  `corepack pnpm install --config.strict-dep-builds=false` komutunu kullanın. Paket yine
+  çalıştırılmaz.
 
 > Sadeleştirme neden TerritoryKit'in `--strategy topology-safe` komutuyla yapılmıyor:
 > [docs/territorykit-simplification-finding.md](docs/territorykit-simplification-finding.md).
-
-## Mesh üretimi (tek seviye)
-
-Örnek veriyi indirip tüm bölgeler için TKMS mesh üretmek:
-
-Tek bir seviyeyi doğrudan üretmek (TerritoryKit CLI gerektirmez):
-
-```bash
-python scripts/fetch_sample_dataset.py
-cd services/geometry-api
-python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes --lod high
-```
-
-Çıktı: bölge başına bir `.tkms` dosyası ve origin, bölge sayıları, bbox ve kaynak lisansını
-taşıyan bir `index.json`. Geçersiz geometri varsayılan olarak reddedilir (`--repair-invalid`),
-float32 ızgarasında kaybolan parça/delik `high` seviyesinde hata verir (`--allow-lossy`).
 
 `--lod high|medium|low`; her seviye ayrı çıktı dizinine yazılır. 81 il ölçümü:
 
 | Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik |
 |---|---|---|---|---|---|---|
-| kaynak | 366.157 | — | — | — | 705 | 0 |
+| normalize sadeleştirme girdisi¹ | 366.157 | — | — | — | 705 | 0 |
 | high | 240.379 | %100 | 238.969 | 3.359.438 | 705 | 0 |
 | medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 |
 | low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 |
 
-`high` her parçayı ve deliği koruyor (kayıp sıfır, build kapısı bunu zorluyor); `medium` ve `low`
-küçük adaları bilerek düşürüyor ve düşen her parça `index.json`'a yazılıyor.
+`high`, normalizasyon sonrası gelen 705 parçayı ve tüm delikleri sadeleştirme boyunca koruyor;
+ancak normalizasyon ham kaynaktan yedi küçük adacığı düşürdüğü için uçtan uca `high` da
+`lossy: true`/`pickingUnsafe: true`. `medium` ve `low` ayrıca küçük parçaları bilerek düşürüyor ve
+her kayıp `index.json`'a yazılıyor.
 
-## Bileşenler
+¹ 366.157, normalizasyonun yedi adacığı düşürmesinden sonraki 705 kapalı ring'in kapanış
+koordinatlarını da sayar; Faz 1'deki 365.481 ise ham 712 ring'in kapanış tekrarları çıkarılmış
+TKMS vertex sayısıdır, bu yüzden iki sayı aynı ölçüm değildir.
 
-| Bileşen | Ne yapar |
-|---|---|
-| `services/geometry-api` | Bölge poligonlarını sunucu tarafında üçgenler, LOD üretir, binary mesh (TKMS) olarak servis eder |
-| `packages/com.oguzhanonur.territorykit-unity` | Bu mesh'leri indirir, Unity `Mesh` nesnesine çevirir, havuzlar, viewport'a göre yükler |
+## Alternatifler
 
-Neden ağır iş sunucuda yapılıyor: bkz. [docs/mesh-format.md](docs/mesh-format.md) ve [docs/projection.md](docs/projection.md).
+Dürüst karşılaştırma — hiçbiri "kötü", hepsi farklı bir ihtiyacı çözüyor:
+
+- **[Cesium for Unity](https://github.com/CesiumGS/cesium-unity)** (Apache-2.0): v1.23'ten beri
+  (Mart 2026) `CesiumGeoJsonDocumentRasterOverlay` ile stilize GeoJSON'u terrain/3D Tiles üzerine
+  **raster katman** olarak drape edebiliyor. Bu ciddi bir yetenek — ama çıktı bir raster overlay;
+  bölge başına ayrı bir `Mesh`, `MeshCollider`/CPU-picking ile üçgen-bazlı kesin bölge seçimi,
+  havuzlanabilir GameObject vermiyor. Terrain/3D Tiles görselleştirmesi asıl amaçsa daha olgun.
+- **[ArcGIS Maps SDK for Unity](https://developers.arcgis.com/unity/)**: kapsamlı bir platform
+  ama bir Esri hesabı (ArcGIS Location Platform / ArcGIS Online) zorunlu, URP veya HDRP 12.x
+  şart (Built-in render pipeline desteklenmiyor, mobilde HDRP compute shader'ları çoğu cihazda
+  çalışmıyor). Self-hosted, hesap gerektirmeyen dar bir kütüphane arayan için farklı bir ürün.
+- **[Mapbox Unity SDK](https://github.com/mapbox/mapbox-unity-sdk)**: vector tile → mesh
+  dönüşümü yapıyor, bu paketle en yakın örtüşme. Mapbox-hosted API'ler hesap ve kullanım bazlı
+  faturalandırma gerektirir; öte yandan SDK özel TMS/URL kaynaklarını destekler ve
+  [Mapbox Atlas](https://www.mapbox.com/atlas) self-hosted dağıtım sunar, dolayısıyla kaynak ve
+  dağıtım modelini tek bir “self-hosted değil” etiketiyle anlatmak doğru değildir.
+- **MapLibre**: resmi bir Unity SDK'sı yok.
+
+**Sonuç:** bu paket, TerritoryKit'in kimlik/hiyerarşi/komşuluk modelinden **self-hosted, bölge
+başına `Mesh`** üreten dar bir ihtiyaca hizmet ediyor — hesap gerektirmiyor, terrain/3D Tiles
+görselleştirmesi ya da global harita kaplaması değil. Yukarıdakilerin yerini almaz.
 
 ## Geliştirme
 
-Git akışı, dal stratejisi ve commit kuralları için [CONTRIBUTING.md](CONTRIBUTING.md) dosyasına bakın.
+Git akışı, dal stratejisi, commit kuralları ve Unity testlerini elle çalıştırma için
+[CONTRIBUTING.md](CONTRIBUTING.md) dosyasına bakın.
 
 ## Örnek veri seti atfı
 
