@@ -1,6 +1,6 @@
 {
   "name": "com.oguzhanonur.territorykit-unity",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "displayName": "TerritoryKit Unity",
   "description": "Unity renderer for TerritoryKit region meshes: download, decode, pool, and stream by viewport.",
   "unity": "6000.1",
