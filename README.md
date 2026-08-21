@@ -99,6 +99,12 @@ https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.
 Build alırken `Shader.Find("Unlit/Color")` stripping'e takılabilir — bkz. paket README'sindeki
 [Building a player](packages/com.oguzhanonur.territorykit-unity/README.md#building-a-player).
 
+**Örnek sahnenin input backend'i:** `BasicMap` örneği *Project Settings → Player → Active Input
+Handling* ayarının üçünde de (Old, New, Both) çalışır — koşullu derleme ile, pakete Input System
+bağımlılığı eklemeden. Unity 6 yeni projelerde varsayılan olarak yalnız New seçili gelir; paketin
+kendi geliştirme projesi Old'da kurulu olduğu için bu bir temiz-proje testinde ortaya çıktı (bkz.
+`docs/phases/FAZ-6-RAPOR.md`).
+
 ## LOD üretimi (Faz 2)
 
 Ham geoBoundaries GeoJSON'undan üç detay seviyesinde TKMS mesh üretmek — tek komut:

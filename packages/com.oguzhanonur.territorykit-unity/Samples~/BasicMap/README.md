@@ -46,6 +46,13 @@ package): it frames the camera on the dataset once it loads, right-drag pans, th
 zooms between Min/Max Orthographic Size, and a left click resolves through
 `ViewportStreamer.TryPick` and recolours whatever it hits.
 
+**Input backend:** works under any *Project Settings → Player → Active Input Handling* setting —
+Input Manager (Old), Input System Package (New), or Both — via `ENABLE_LEGACY_INPUT_MANAGER`/
+`ENABLE_INPUT_SYSTEM` conditional compilation, and does not add an Input System package
+dependency. A Unity 6 project defaults to New-only, where the legacy `Input` class throws on
+every read; this sample no longer assumes either backend is present. If a project somehow has
+neither active, pan/zoom/click are disabled after one console warning — the map still renders.
+
 Levels are chosen automatically as you zoom — there is no fixed Lod field to set anymore. `high`
 is where you start (closest zoom): its simplification step changes nothing —
 `simplification.topologyChanged` is `false` — so if something looks wrong on screen at that

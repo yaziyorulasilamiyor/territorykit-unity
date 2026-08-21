@@ -2,6 +2,7 @@
   "dependencies": {
     "com.oguzhanonur.territorykit-unity": "file:../../../packages/com.oguzhanonur.territorykit-unity",
     "com.unity.test-framework": "1.4.6",
+    "com.unity.inputsystem": "1.11.2",
     "com.unity.modules.imageconversion": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0",
     "com.unity.modules.physics": "1.0.0",

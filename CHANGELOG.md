@@ -17,6 +17,14 @@ Faz 6 — sağlamlaştırma ve yayın. `v0.6.0` olarak etiketlenecek.
 - README: mimari şeması, uçtan uca hızlı başlangıç, doğrulanmış (kaynağı kontrol edilmiş)
   "Alternatifler" bölümü, güncel durum satırı
 
+### Fixed
+- `BasicMap` örneği Unity 6'nın varsayılan "Input System Package (New)" ayarında Play'e basar
+  basmaz `InvalidOperationException` fırlatıyordu (eski `UnityEngine.Input` API'si) — temiz bir
+  Unity projesinde yapılan UPM kurulum testi buldu, repo'nun kendi dev projesi "Input Manager
+  (Old)" seçili olduğu için hiç görünmemişti. `BasicMapCameraController` artık
+  `ENABLE_LEGACY_INPUT_MANAGER`/`ENABLE_INPUT_SYSTEM` koşullu derlemesiyle Old/New/Both'un
+  üçünde de çalışıyor, pakete Input System bağımlılığı eklemeden
+
 ## [0.5.0] - 2026-08-19 (Faz 5 — havuzlama, viewport streaming, seçim)
 
 ### Added
