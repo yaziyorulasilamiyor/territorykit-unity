@@ -5,10 +5,99 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
 > Durum: Erken geliştirme (Faz 5 tamamlandı — Unity paketi render, pooling, viewport streaming ve
-> seçimle çalışıyor, `v0.5.0`). Henüz yayınlanmış bir sürüm yok; Faz 6 sağlamlaştırma ve ilk
-> release'i hedefliyor.
+> seçimle çalışıyor, `v0.5.0`). Faz 6 sağlamlaştırma ve ilk yayınlanmış sürümü (`v0.6.0`)
+> hedefliyor.
 
 ![Örnek sahne — Türkiye il sınırları Unity'de](docs/phases/faz-4-ornek-sahne.png)
+
+## Ne yapıyor, neden var
+
+TerritoryKit poligon "bölgeler" için lookup, hiyerarşi, komşuluk ve viewport tabanlı yükleme
+sağlıyor ama üç renderer adaptörü de (MapLibre, Leaflet, OpenLayers) web'e özel — hiçbir oyun
+motoru entegrasyonu yok. Bu proje o boşluğu dolduruyor: bölge poligonlarını sunucu tarafında
+üçgenler + LOD üretir, Unity tarafı bunları indirir, `Mesh`'e çevirir, havuzlar ve kamera
+viewport'una göre akıtır.
+
+**Neden ağır iş sunucuda?** Triangülasyon ve topoloji-güvenli basitleştirme CPU-yoğun. Mobil
+cihazda her açılışta yapmak pil ve süre israfı; sunucuda bir kez hesaplanıp sonsuza kadar
+cache'lenir (`Cache-Control: immutable` — bkz. [docs/api.md](docs/api.md)).
+
+| Bileşen | Ne yapar |
+|---|---|
+| `services/geometry-api` (Python/FastAPI) | Bölge poligonlarını sunucu tarafında üçgenler, LOD üretir, binary mesh (TKMS) olarak servis eder |
+| `packages/com.oguzhanonur.territorykit-unity` (C#/UPM) | Bu mesh'leri indirir, Unity `Mesh` nesnesine çevirir, havuzlar, viewport'a göre yükler/boşaltır, tıklamayı bölgeye eşler |
+
+## Mimari
+
+```
+GeoJSON (geoBoundaries)
+   │  territory import geoboundaries (vendor/territorykit CLI)
+   ▼
+dataset.json ──► territory geometry simplify (topology-safe, high/medium/low)
+   │
+   ▼
+geometry-api build (earcut triangülasyon, WGS84→yerel metre projeksiyon)
+   │
+   ▼
+TKMS mesh dosyaları × 3 LOD  ──►  FastAPI (/v1/datasets/.../mesh, .../viewport)
+                                        │  UnityWebRequest, TKMB batch
+                                        ▼
+                          Unity: MeshDecoder → TerritoryPool → ViewportStreamer
+                                        │
+                                        ▼
+                    Kamera viewport'una göre yüklenen/boşalan bölge Mesh'leri,
+                    CPU nokta-üçgen picking, MaterialPropertyBlock renklendirme
+```
+
+Detaylar: [docs/mesh-format.md](docs/mesh-format.md) (TKMS binary format),
+[docs/projection.md](docs/projection.md) (WGS84 → yerel metre), [docs/api.md](docs/api.md) (HTTP
+sözleşmesi).
+
+## Hızlı başlangıç
+
+```bash
+# 1) Sunucu — örnek veriyi indir, mesh üret, API'yi başlat
+python scripts/fetch_sample_dataset.py
+cd services/geometry-api
+python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes --lod high
+uvicorn geometry_api.main:app --reload   # http://localhost:8000/docs
+```
+
+```csharp
+// 2) Unity — paketi ekle (bkz. Kurulum), sonra:
+using TerritoryKit.Unity;
+
+var client = new TerritoryClient("http://127.0.0.1:8000");
+DatasetInfo dataset = await client.GetDatasetAsync("tr-adm1");
+Mesh mesh = await client.GetMeshAsync(dataset.id, dataset.revisionId, "06", "high");
+
+var root = new GameObject("Territories").transform;
+root.localRotation = TerritoryMapPlacement.RootRotation;
+var go = new GameObject("06");
+go.transform.SetParent(root, false);
+go.AddComponent<MeshFilter>().sharedMesh = mesh;
+go.AddComponent<MeshRenderer>().sharedMaterial = new Material(Shader.Find("Unlit/Color"));
+```
+
+Ya da bir GameObject'e `TerritoryMapRenderer` ekleyip tüm dataset'i tek seferde çizdir, ya da
+`ViewportStreamer` ile pooling + kamera viewport'una göre akış + tıkla-vurgula al — `Samples~/
+BasicMap` bunu gösteriyor. Detaylı API için
+[packages/.../README.md](packages/com.oguzhanonur.territorykit-unity/README.md).
+
+## Kurulum (Unity paketi)
+
+**Gereksinim:** Unity **6000.1**'de geliştirildi ve test edildi. Kod 2023+ API kullanmıyor, bu
+yüzden **2022.3 LTS** hedeflenen taban — ama bu ortamda 2022.3 kurulu değil, o yüzden elle
+doğrulanmadı; bu bir niyet, doğrulanmış bir iddia değil.
+
+Package Manager → **Add package from git URL**:
+
+```
+https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.oguzhanonur.territorykit-unity
+```
+
+Build alırken `Shader.Find("Unlit/Color")` stripping'e takılabilir — bkz. paket README'sindeki
+[Building a player](packages/com.oguzhanonur.territorykit-unity/README.md#building-a-player).
 
 ## LOD üretimi (Faz 2)
 
@@ -47,22 +136,6 @@ corepack pnpm --filter "@territory-kit/cli..." build
 > Sadeleştirme neden TerritoryKit'in `--strategy topology-safe` komutuyla yapılmıyor:
 > [docs/territorykit-simplification-finding.md](docs/territorykit-simplification-finding.md).
 
-## Mesh üretimi (tek seviye)
-
-Örnek veriyi indirip tüm bölgeler için TKMS mesh üretmek:
-
-Tek bir seviyeyi doğrudan üretmek (TerritoryKit CLI gerektirmez):
-
-```bash
-python scripts/fetch_sample_dataset.py
-cd services/geometry-api
-python -m geometry_api.build --input data/datasets/turkey-provinces.geojson --output data/meshes --lod high
-```
-
-Çıktı: bölge başına bir `.tkms` dosyası ve origin, bölge sayıları, bbox ve kaynak lisansını
-taşıyan bir `index.json`. Geçersiz geometri varsayılan olarak reddedilir (`--repair-invalid`),
-float32 ızgarasında kaybolan parça/delik `high` seviyesinde hata verir (`--allow-lossy`).
-
 `--lod high|medium|low`; her seviye ayrı çıktı dizinine yazılır. 81 il ölçümü:
 
 | Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik |
@@ -75,18 +148,33 @@ float32 ızgarasında kaybolan parça/delik `high` seviyesinde hata verir (`--al
 `high` her parçayı ve deliği koruyor (kayıp sıfır, build kapısı bunu zorluyor); `medium` ve `low`
 küçük adaları bilerek düşürüyor ve düşen her parça `index.json`'a yazılıyor.
 
-## Bileşenler
+## Alternatifler
 
-| Bileşen | Ne yapar |
-|---|---|
-| `services/geometry-api` | Bölge poligonlarını sunucu tarafında üçgenler, LOD üretir, binary mesh (TKMS) olarak servis eder |
-| `packages/com.oguzhanonur.territorykit-unity` | Bu mesh'leri indirir, Unity `Mesh` nesnesine çevirir, havuzlar, viewport'a göre yükler |
+Dürüst karşılaştırma — hiçbiri "kötü", hepsi farklı bir ihtiyacı çözüyor:
 
-Neden ağır iş sunucuda yapılıyor: bkz. [docs/mesh-format.md](docs/mesh-format.md) ve [docs/projection.md](docs/projection.md).
+- **[Cesium for Unity](https://github.com/CesiumGS/cesium-unity)** (Apache-2.0): v1.23'ten beri
+  (Mart 2026) `CesiumGeoJsonDocumentRasterOverlay` ile stilize GeoJSON'u terrain/3D Tiles üzerine
+  **raster katman** olarak drape edebiliyor. Bu ciddi bir yetenek — ama çıktı bir raster overlay;
+  bölge başına ayrı bir `Mesh`, `MeshCollider`/CPU-picking ile üçgen-bazlı kesin bölge seçimi,
+  havuzlanabilir GameObject vermiyor. Terrain/3D Tiles görselleştirmesi asıl amaçsa daha olgun.
+- **[ArcGIS Maps SDK for Unity](https://developers.arcgis.com/unity/)**: kapsamlı bir platform
+  ama bir Esri hesabı (ArcGIS Location Platform / ArcGIS Online) zorunlu, URP veya HDRP 12.x
+  şart (Built-in render pipeline desteklenmiyor, mobilde HDRP compute shader'ları çoğu cihazda
+  çalışmıyor), indirme boyutu yüzlerce MB'a varan native binary'ler içeriyor. Self-hosted, hesap
+  gerektirmeyen bir kütüphane arayan için ağır.
+- **[Mapbox Unity SDK](https://github.com/mapbox/mapbox-unity-sdk)**: vector tile → mesh
+  dönüşümü yapıyor, bu paketle en yakın örtüşme. Ama bir Mapbox hesabına ve kullanım bazlı
+  faturalandırmaya (MAU veya tile isteği başına) bağlı — self-hosted değil.
+- **MapLibre**: resmi bir Unity SDK'sı yok.
+
+**Sonuç:** bu paket, TerritoryKit'in kimlik/hiyerarşi/komşuluk modelinden **self-hosted, bölge
+başına `Mesh`** üreten dar bir ihtiyaca hizmet ediyor — hesap gerektirmiyor, terrain/3D Tiles
+görselleştirmesi ya da global harita kaplaması değil. Yukarıdakilerin yerini almaz.
 
 ## Geliştirme
 
-Git akışı, dal stratejisi ve commit kuralları için [CONTRIBUTING.md](CONTRIBUTING.md) dosyasına bakın.
+Git akışı, dal stratejisi, commit kuralları ve Unity testlerini elle çalıştırma için
+[CONTRIBUTING.md](CONTRIBUTING.md) dosyasına bakın.
 
 ## Örnek veri seti atfı
 
