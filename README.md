@@ -19,8 +19,9 @@ motoru entegrasyonu yok. Bu proje o boşluğu dolduruyor: bölge poligonlarını
 viewport'una göre akıtır.
 
 **Neden ağır iş sunucuda?** Triangülasyon ve topoloji-güvenli basitleştirme CPU-yoğun. Mobil
-cihazda her açılışta yapmak pil ve süre israfı; sunucuda bir kez hesaplanıp sonsuza kadar
-cache'lenir (`Cache-Control: immutable` — bkz. [docs/api.md](docs/api.md)).
+cihazda her açılışta yapmak pil ve süre israfı; sunucuda bir kez hesaplanır ve revizyonlu URL
+yaşadığı sürece immutable servis edilir. Sunucu varsayılan olarak son üç revizyonu tutar; eski
+revizyonlar budanabilir (bkz. [docs/api.md](docs/api.md)).
 
 | Bileşen | Ne yapar |
 |---|---|
@@ -110,9 +111,8 @@ bakın.
 
 ## Kurulum (Unity paketi)
 
-**Gereksinim:** Unity **6000.1**'de geliştirildi ve test edildi. Kod 2023+ API kullanmıyor, bu
-yüzden **2022.3 LTS** hedeflenen taban — ama bu ortamda 2022.3 kurulu değil, o yüzden elle
-doğrulanmadı; bu bir niyet, doğrulanmış bir iddia değil.
+**Gereksinim:** Paket manifestinin desteklediği ve test edilen taban Unity **6000.1**'dir;
+2022.3 uyumluluğu doğrulanmamıştır ve paket manifesti o sürümde kurulumu desteklediğini söylemez.
 
 Package Manager → **Add package from git URL**:
 
@@ -123,11 +123,10 @@ https://github.com/yaziyorulasilamiyor/territorykit-unity.git?path=packages/com.
 Build alırken `Shader.Find("Unlit/Color")` stripping'e takılabilir — bkz. paket README'sindeki
 [Building a player](packages/com.oguzhanonur.territorykit-unity/README.md#building-a-player).
 
-**Örnek sahnenin input backend'i:** `BasicMap` örneği *Project Settings → Player → Active Input
-Handling* ayarının üçünde de (Old, New, Both) çalışır — koşullu derleme ile, pakete Input System
-bağımlılığı eklemeden. Unity 6 yeni projelerde varsayılan olarak yalnız New seçili gelir; paketin
-kendi geliştirme projesi Old'da kurulu olduğu için bu bir temiz-proje testinde ortaya çıktı (bkz.
-`docs/phases/FAZ-6-RAPOR.md`).
+**Örnek sahnenin input backend'i:** `BasicMap`, pakete Input System bağımlılığı eklemeden Old/New/
+Both için ayrı koşullu derleme yolları taşır. New-only temiz derlendi; tam EditMode/PlayMode suite'i
+Both altında geçti, New-only pan/zoom/tıklama davranışının manuel Unity doğrulaması bekleniyor
+(bkz. `docs/phases/FAZ-6-RAPOR.md`).
 
 ## LOD üretimi (Faz 2)
 
@@ -175,8 +174,10 @@ corepack pnpm --filter "@territory-kit/cli..." build
 | medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 |
 | low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 |
 
-`high` her parçayı ve deliği koruyor (kayıp sıfır, build kapısı bunu zorluyor); `medium` ve `low`
-küçük adaları bilerek düşürüyor ve düşen her parça `index.json`'a yazılıyor.
+`high`, normalizasyon sonrası gelen 705 parçayı ve tüm delikleri sadeleştirme boyunca koruyor;
+ancak normalizasyon ham kaynaktan yedi küçük adacığı düşürdüğü için uçtan uca `high` da
+`lossy: true`/`pickingUnsafe: true`. `medium` ve `low` ayrıca küçük parçaları bilerek düşürüyor ve
+her kayıp `index.json`'a yazılıyor.
 
 ## Alternatifler
 
@@ -190,11 +191,12 @@ Dürüst karşılaştırma — hiçbiri "kötü", hepsi farklı bir ihtiyacı ç
 - **[ArcGIS Maps SDK for Unity](https://developers.arcgis.com/unity/)**: kapsamlı bir platform
   ama bir Esri hesabı (ArcGIS Location Platform / ArcGIS Online) zorunlu, URP veya HDRP 12.x
   şart (Built-in render pipeline desteklenmiyor, mobilde HDRP compute shader'ları çoğu cihazda
-  çalışmıyor), indirme boyutu yüzlerce MB'a varan native binary'ler içeriyor. Self-hosted, hesap
-  gerektirmeyen bir kütüphane arayan için ağır.
+  çalışmıyor). Self-hosted, hesap gerektirmeyen dar bir kütüphane arayan için farklı bir ürün.
 - **[Mapbox Unity SDK](https://github.com/mapbox/mapbox-unity-sdk)**: vector tile → mesh
-  dönüşümü yapıyor, bu paketle en yakın örtüşme. Ama bir Mapbox hesabına ve kullanım bazlı
-  faturalandırmaya (MAU veya tile isteği başına) bağlı — self-hosted değil.
+  dönüşümü yapıyor, bu paketle en yakın örtüşme. Mapbox-hosted API'ler hesap ve kullanım bazlı
+  faturalandırma gerektirir; öte yandan SDK özel TMS/URL kaynaklarını destekler ve
+  [Mapbox Atlas](https://www.mapbox.com/atlas) self-hosted dağıtım sunar, dolayısıyla kaynak ve
+  dağıtım modelini tek bir “self-hosted değil” etiketiyle anlatmak doğru değildir.
 - **MapLibre**: resmi bir Unity SDK'sı yok.
 
 **Sonuç:** bu paket, TerritoryKit'in kimlik/hiyerarşi/komşuluk modelinden **self-hosted, bölge

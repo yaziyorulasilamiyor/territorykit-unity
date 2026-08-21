@@ -6,7 +6,8 @@ Dal: feat/phase-4-unity-render · Commit sayısı: 20
 ## Ne yapıldı
 - `TkmsHeader` + `MeshDecoder`: worker thread'de tam doğrulama (sonlu koordinat, index aralığı, bbox'ın
   **gerçek** vertex sınırlarına eşitliği); ana thread'de yalnız 4 Mesh çağrısı + 2 kopya
-- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` ile kopyasız okuma,
+- `TerritoryClient`: metadata, sayfalı liste, tekil mesh, TKMB batch; `nativeData` ile handler
+  buffer'ına tahsissiz erişim ve istek kapanmadan önce sahipli `NativeArray`'e tek açık kopya,
   `Abort()` ile gerçek iptal, cache **yok** (Karar 3). `LodPolicy` bayrakları yorumlar ama **seçim
   yapmaz**; `TerritoryMapPlacement` yerleştirme ve kamera yönünü tek yerde tutar
 - `TerritoryMapRenderer` + `Samples~/BasicMap` (81 il, tek batch); `capture_sample.ps1` ile uvicorn →
