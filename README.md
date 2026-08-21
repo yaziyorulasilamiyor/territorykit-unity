@@ -4,9 +4,8 @@ Hiyerarşik, düzensiz poligon "bölgeler" (ülke → il → ilçe → mahalle) 
 [TerritoryKit](https://github.com/mberatkaya/TerritoryKit) açık kaynak geospatial SDK'sının
 web-dışı (MapLibre/Leaflet/OpenLayers dışı) ilk oyun motoru entegrasyonudur.
 
-> Durum: Erken geliştirme (Faz 5 tamamlandı — Unity paketi render, pooling, viewport streaming ve
-> seçimle çalışıyor, `v0.5.0`). Faz 6 sağlamlaştırma ve ilk yayınlanmış sürümü (`v0.6.0`)
-> hedefliyor.
+> Durum: Erken sürüm `v0.6.0` — sunucu build/yayın zinciri ile Unity render, pooling, viewport
+> streaming ve seçim kapsamı tamamlandı; aşağıdaki bilinen sınırlar geçerlidir.
 
 ![Örnek sahne — Türkiye il sınırları Unity'de](docs/phases/faz-4-ornek-sahne.png)
 
@@ -34,7 +33,7 @@ revizyonlar budanabilir (bkz. [docs/api.md](docs/api.md)).
 GeoJSON (geoBoundaries)
    │  territory import geoboundaries (vendor/territorykit CLI)
    ▼
-dataset.json ──► territory geometry simplify (topology-safe, high/medium/low)
+dataset.json ──► paylaşılan-arc sadeleştirmesi (topojson, high/medium/low)
    │
    ▼
 geometry-api build (earcut triangülasyon, WGS84→yerel metre projeksiyon)
@@ -159,8 +158,9 @@ corepack pnpm --filter "@territory-kit/cli..." build
 - `corepack enable` Windows'ta `C:\Program Files\nodejs` altına yazamayıp `EPERM` verebilir.
   Gerek yok — `corepack pnpm ...` doğrudan çalışır.
 - pnpm, `@scarf/scarf` (telemetri) paketinin install script'ini bloklayıp `ERR_PNPM_IGNORED_BUILDS`
-  ile çıkış kodu 1 döner. Script'i **onaylamayın**; `pnpm config set strict-dep-builds false`
-  ile uyarıyı hataya çevirmeyi kapatın. Paket yine çalıştırılmaz.
+  ile çıkış kodu 1 döner. Script'i **onaylamayın**; hızlı başlangıçtaki
+  `corepack pnpm install --config.strict-dep-builds=false` komutunu kullanın. Paket yine
+  çalıştırılmaz.
 
 > Sadeleştirme neden TerritoryKit'in `--strategy topology-safe` komutuyla yapılmıyor:
 > [docs/territorykit-simplification-finding.md](docs/territorykit-simplification-finding.md).
@@ -169,7 +169,7 @@ corepack pnpm --filter "@territory-kit/cli..." build
 
 | Seviye | Vertex | high'ın %'si | Üçgen | Bayt | Parça | Delik |
 |---|---|---|---|---|---|---|
-| kaynak | 366.157 | — | — | — | 705 | 0 |
+| normalize sadeleştirme girdisi¹ | 366.157 | — | — | — | 705 | 0 |
 | high | 240.379 | %100 | 238.969 | 3.359.438 | 705 | 0 |
 | medium | 85.926 | %35,7 | 84.518 | 1.197.108 | 704 | 0 |
 | low | 30.753 | **%12,8** | 29.383 | 424.914 | 685 | 0 |
@@ -178,6 +178,10 @@ corepack pnpm --filter "@territory-kit/cli..." build
 ancak normalizasyon ham kaynaktan yedi küçük adacığı düşürdüğü için uçtan uca `high` da
 `lossy: true`/`pickingUnsafe: true`. `medium` ve `low` ayrıca küçük parçaları bilerek düşürüyor ve
 her kayıp `index.json`'a yazılıyor.
+
+¹ 366.157, normalizasyonun yedi adacığı düşürmesinden sonraki 705 kapalı ring'in kapanış
+koordinatlarını da sayar; Faz 1'deki 365.481 ise ham 712 ring'in kapanış tekrarları çıkarılmış
+TKMS vertex sayısıdır, bu yüzden iki sayı aynı ölçüm değildir.
 
 ## Alternatifler
 

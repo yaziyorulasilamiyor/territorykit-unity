@@ -24,14 +24,12 @@ cd services\geometry-api
 ..\..\.venv\Scripts\python.exe -m uvicorn geometry_api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Two things that will otherwise cost you an afternoon:
+One thing that will otherwise cost you an afternoon:
 
 - **Use `127.0.0.1`, not `localhost`** — in the command above and in the scene's Base Url. On
   Windows `localhost` resolves to the IPv6 `::1` first, while uvicorn binds IPv4 only, so the
   request fails against a server that is up and serving. `scripts/capture_sample.ps1` hit exactly
   this.
-- **Pass absolute paths to `build_lod.py`.** It runs part of the chain in a subprocess with a
-  different working directory, so a relative `--output` resolves against the wrong root.
 
 ## Running it
 
@@ -58,9 +56,10 @@ project somehow has neither backend active, pan/zoom/click are disabled after on
 and the map still renders.
 
 Levels are chosen automatically as you zoom — there is no fixed Lod field to set anymore. `high`
-is where you start (closest zoom): its simplification step changes nothing —
-`simplification.topologyChanged` is `false` — so if something looks wrong on screen at that
-level, the cause is on the client side rather than in geometry the simplifier merged.
+is where you start (closest zoom): it reduces boundary vertices without changing the post-
+normalization part/hole structure (`simplification.topologyChanged` is `false`). The upstream
+normalization still drops seven tiny islets, so `high` is not lossless or universally safe for
+picking; inspect the dataset metadata when exact source coverage matters.
 
 ## Don't drag territories in the Scene view
 

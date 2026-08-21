@@ -11,7 +11,8 @@ Dal: feat/phase-3-http-api · Commit sayısı: 21
   mesh/{territoryId}` (GET/HEAD, gzip, ETag, 304), `.../mesh/batch` (TKMB v1);
   `/health`+`/ready`+`/metrics` kasıtlı olarak `/v1` dışında
 - `manifest_validation.py`: `check_lod_report.py`'nin denetleyicisi paylaşılan modül
-- `registry.py`: revizyon çözümleme, yayın-sonrası bütünlük denetimi, bellek-içi lease
+- `registry.py`: revizyon çözümleme, yayın-sonrası bütünlük denetimi ve ayrı publisher sürecinin
+  görebildiği `cache_dir/leases` altında dosya-tabanlı lease
 - Sıfır istek-zamanı geometri hesabı artık **testle kanıtlı**: statik AST taraması + temiz
   subprocess'te gerçek istekler sonrası `sys.modules` denetimi
 - CI'a ayrı `docker` job'ı: build + run + `/health` poll + log dökümü + cleanup

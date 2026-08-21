@@ -44,13 +44,13 @@ kodda da geçerdi — iki hatanın ilk turda hayatta kalma sebebi bu.
 1. **Vertex'ler 3 float'a genişletiliyor, 2'ye değil** — ölçüldü: `Float32 × 2` pozisyon D3D12'de kabul
    edildi ve aynı kaplamayla render etti (%39,06). Reddedildi: cihaz bağımlı, Faz 5'in
    `MeshCollider`'ını test edilmemiş zemine koyar, kazancı da worker thread'deydi.
-2. **`package.json` fiilen test edilen sürümü yazıyor (`6000.1`)** — makinede 2022.3 yok; manifest
-   iddia dosyasıdır. 2023+ API kullanılmadı; 2022.3 hedefi README'de **ayrı ve doğrulanmamış**.
+2. **`package.json` desteklenen/test edilen tabanı yazıyor (`6000.1`)** — 2022.3 çalıştırılmadı ve
+   güncel README o sürüm için uyumluluk iddia etmiyor.
 3. **Faz 4'te cache yok; Faz 5 revizyon-anahtarlı disk cache'i kullanacak** — `UnityWebRequest`'in C#
    kaynağında cache yok, `Caching` yalnız AssetBundle için, ETag/304 işlenmiyor; URL'ler zaten değişmez.
 
 ## Bilinen eksikler ve riskler
-- **2022.3 hiç çalıştırılmadı**; kod 2023+ API içermiyor ama bu doğrulanmamış bir uyumluluktur.
+- **2022.3 hiç çalıştırılmadı** ve manifest 6000.1 istediği için desteklenen taban değildir.
 - **`build_lod.py` göreli `--output` ile kırılıyor** (Faz 2 kodu): alt süreç `cwd`'yi değiştiriyor; CI
   mutlak yol geçtiği için yeşil kalıyor — sessiz bir tuzak. Düzeltmesi `args.output.resolve()` kadar.
 - **Unity CI job'ı yok** (Faz 6). **TKMB `entryEncoding: gzip` okunmuyor** — gzip'li konteyner net

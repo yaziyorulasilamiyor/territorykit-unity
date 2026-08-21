@@ -17,7 +17,7 @@ Bu proje o boşluğu dolduruyor:
 | **Geometry API** (Python/FastAPI) | Bölge poligonlarını sunucu tarafında üçgenler (triangulation), LOD üretir, binary mesh olarak servis eder |
 | **Unity paketi** (C#) | Bu mesh'leri indirir, Unity `Mesh` nesnesine çevirir, havuzlar (pooling), viewport'a göre yükler/boşaltır, tıklamayı bölgeye eşler |
 
-**Neden ağır iş sunucuda?** Triangülasyon ve topoloji-güvenli basitleştirme CPU-yoğun işlerdir. Mobil cihazda her açılışta yapmak pil ve süre israfıdır. Sunucuda bir kez hesaplanır, sonsuza kadar cache'lenir.
+**Neden ağır iş sunucuda?** Triangülasyon ve topoloji-güvenli basitleştirme CPU-yoğun işlerdir. Mobil cihazda her açılışta yapmak pil ve süre israfıdır. Sunucuda bir kez hesaplanır; yayın URL'leri immutable'dır ama varsayılan retention son üç revizyondur.
 
 ---
 
@@ -166,7 +166,7 @@ Faz 0'da `CONTRIBUTING.md` yaz ve yukarıdaki commit/dal kurallarını oraya koy
 - Docker + Docker Compose
 
 **Unity tarafı**
-- Unity **2022.3 LTS veya daha yeni**
+- Unity **6000.1 veya daha yeni** (paket manifestinin desteklenen ve test edilen tabanı)
 - UPM (Unity Package Manager) paket düzeni
 - `UnityWebRequest` — HTTP
 - `Unity.Collections` (`NativeArray`) — GC baskısını azaltmak için
@@ -308,7 +308,7 @@ WGS84 (lon, lat) derece
 | `float32` hassasiyeti | Sınırlar kayar | Origin çıkarma zorunlu (Bölüm 7) |
 | 65535 vertex limiti | Mesh bozulur | `IndexFormat.UInt32` + flags biti |
 | Bağımsız basitleştirme | Komşu sınırlar arasında **çatlak** oluşur | Paylaşılan kenarı bir kez basitleştir (Faz 2) |
-| Her bölge = 1 GameObject | 900 draw call, telefonda ölür | Pooling + batching (Faz 5) |
+| Her bölge = 1 GameObject | 900 draw call, telefonda ölür | Pooling uygulandı; batching uygulanmadı, ölçülen sınır Faz 5 raporunda |
 | `new Mesh()` her karede | GC spike, takılma | Havuzdan al, `mesh.Clear()` ile yeniden kullan |
 | Dataset lisansı | Hukuki sorun | Kaynağı ve lisansı README'de belirt (geoBoundaries/OSM CC BY-SA atıf ister) |
 | Antimeridyen / kutuplar | Poligon ters çevrilir, dev üçgen | TKMS v1 bunları desteklemiyor. `docs/mesh-format.md`'ye **bilinen sınır** olarak yaz; Türkiye kapsamında sorun değil |
@@ -380,19 +380,16 @@ WGS84 (lon, lat) derece
 
 ---
 
-### FAZ 2 — LOD üretimi (TerritoryKit sadeleştirmesi üzerinden)
+### FAZ 2 — LOD üretimi (paylaşılan arc sadeleştirmesi)
 
 **Dal:** `feat/phase-2-lod-topology`
 
-> ⚠️ **BU FAZ YENİDEN TANIMLANDI. Eski planı uygulama.**
->
-> TerritoryKit'te **zaten topoloji-güvenli sadeleştirme var**:
-> ```
-> territory geometry simplify <dataset.json> --strategy topology-safe --detail high,medium,low
-> ```
-> Kendi Douglas-Peucker / arc grafiği implementasyonunu **YAZMA**. İki farklı sadeleştirme politikası zamanla ayrışır ve bakım yükü olur. Adapte ettiğin kütüphanenin çıktısını girdi olarak kullan.
+> **Uygulanan mimari:** TerritoryKit `topology-safe` stratejisi ölçümde ring'leri bağımsız
+> sadeleştirip çatlak bıraktığı için reddedildi; TerritoryKit CLI yalnız import adımında kaldı ve
+> `scripts/simplify.py` topojson'un ortak arc grafiğini kullanıyor (kanıt: Faz 2 raporu).
 
-**Amaç:** 3 detay seviyesi üretmek. Sadeleştirmeyi TerritoryKit yapar; **sen üçgenler ve çatlak kalmadığını kanıtlarsın.**
+**Amaç:** 3 detay seviyesi üretmek; paylaşılan sınırı bir kez sadeleştirip üçgenleme ve float32
+sonrasında çatlak kalmadığını kanıtlamak.
 
 **Yeni akış**
 
@@ -400,7 +397,7 @@ WGS84 (lon, lat) derece
 geoBoundaries GeoJSON
    ↓  territory import geojson         (vendor/territorykit CLI)
 dataset.json
-   ↓  territory geometry simplify --strategy topology-safe --detail high,medium,low
+   ↓  scripts/simplify.py (topojson ortak arc; high/medium/low)
 high / medium / low dataset
    ↓  senin Python servisin (Faz 1 kodu)
 TKMS mesh dosyaları × 3 seviye
@@ -412,7 +409,7 @@ TKMS mesh dosyaları × 3 seviye
 - [ ] Node/pnpm sürüm gereksinimlerini `README.md`'ye ve CI'ya yaz
 - [ ] `loader.py` üç seviyeyi de okuyabilsin (Faz 1'de dataset.json desteği zaten var)
 - [ ] Build CLI'a `--lod high|medium|low` seçeneği ekle, her seviye ayrı çıktı dizinine
-- [ ] `simplify.py` **yer tutucu olarak kalır** — içine "TerritoryKit CLI kullanılıyor, bkz. scripts/build_lod.py" notu yaz
+- [x] `simplify.py` — topojson ortak arc grafiğiyle üç seviyeyi deterministik üret
 
 **Testler**
 - [ ] **Çatlak testi (en kritik):** her LOD seviyesinde, **üçgenleme ve float32 yuvarlaması SONRASI** komşu bölgeler arasında boşluk veya çakışma yok. TerritoryKit temiz çıktı verse bile senin boru hattın bozabilir — asıl kanıtlanacak olan bu
@@ -435,7 +432,8 @@ TKMS mesh dosyaları × 3 seviye
 > çiziliyor. Uzaktan bakışta görünmez ama tıklama o noktada ili seçer — Unity'de olmayan bir
 > kara köprüsü. `low`'da 30 birleşmenin eklediği alan **269,8 km²** ölçüldü.
 >
-> **Sadeleştirmesi hiçbir şeyi değiştirmeyen tek seviye `high`.** (Düzeltme, 4. tur: bu satır
+> **Sadeleştirmesi yapısal değişiklik üretmeyen tek seviye `high`.** Sınır vertex'leri yine
+> azalır; burada anlatılan yalnız parça/delik yapısıdır. (Düzeltme, 4. tur: bu satır
 > önce "`high`/`medium` kullanılmalı" diyordu, bu **yanlıştı**.) Ölçüm: `medium`'da da 3 birleşme,
 > 3 bölünme ve gerçekten yok olan 1 parça (Artvin, 685 m²) var; eklenen alan 15,9 km². `high`'da
 > birleşme, bölünme, yok olan parça ve kaybolan delik **sıfır** — bunu manifestte
@@ -582,8 +580,10 @@ TerritoryKit CLI çalışmazsa (Node sürümü, submodule pin uyumsuzluğu, buil
 - [ ] `README.md` — ne olduğu, neden var olduğu, kurulum, 10 satırlık hızlı başlangıç, mimari şeması, **GIF veya ekran görüntüsü**
 - [ ] `README.md`'ye **"Alternatifler"** bölümü — dürüst karşılaştırma, savunmacı olmadan:
   - **Cesium for Unity** (Apache-2.0): v1.23'ten beri GeoJSON okuyup terrain/3D Tiles üzerine raster overlay olarak drape edebiliyor. Çıktısı raster katman; bölge başına ayrı `Mesh`, collider, havuzlama ve üçgen-bazlı kesin bölge seçimi vermiyor
-  - **ArcGIS Maps SDK for Unity**: kapsamlı ama Esri lisansı/hesabı gerektiriyor, ~538 MB, URP/HDRP zorunlu
-  - **Mapbox Unity SDK**: vector tile → mesh dönüşümü yapıyor (en yakın örtüşme), ama Mapbox hesabı/TOS'una ve iOS/Android hedeflerine bağlı
+  - **ArcGIS Maps SDK for Unity**: kapsamlı ama Esri hesabı gerektiriyor; URP/HDRP zorunlu, Built-in desteklenmiyor
+  - **Mapbox Unity SDK**: vector tile → mesh dönüşümü yapıyor (en yakın örtüşme); Mapbox-hosted
+    API'ler hesap gerektirir ama SDK özel TMS/URL kaynaklarını, Mapbox Atlas da self-hosted
+    dağıtımı destekler
   - **MapLibre**: resmi Unity SDK'sı yok
   - Sonuç cümlesi: bu paket, TerritoryKit'in kimlik/hiyerarşi/komşuluk modelinden **self-hosted, bölge başına Mesh** üreten dar bir ihtiyaca hizmet eder; yukarıdakilerin yerini almaz
 - [ ] `CHANGELOG.md` — semver, 0.1.0 girişi
@@ -592,7 +592,7 @@ TerritoryKit CLI çalışmazsa (Node sürümü, submodule pin uyumsuzluğu, buil
 - [ ] Geometry API için Docker image build eder ve çalışır
 - [ ] CI: Python testleri + Unity testleri (Unity CI zorsa, sebebini yaz ve manuel adımı belgele)
 - [ ] `docs/` içindeki her şey güncel ve uygulamayla tutarlı
-- [ ] `v0.1.0` release tag'i ve GitHub Release notu
+- [ ] `v0.6.0` release tag'i ve GitHub Release notu
 
 **Bitti sayılır**
 - Temiz bir Unity projesine paket kurulabiliyor ve örnek sahne çalışıyor

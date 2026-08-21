@@ -18,7 +18,7 @@ Dal: feat/phase-1-geometry-engine · Commit sayısı: 33
 | Delik (Fixture C/D) · MultiPolygon | delik içi nokta **0** üçgende · 21 geometride parça-arası üçgen **yok** |
 | Winding · round-trip (81 il, uint16+uint32) | tüm üçgenler CW (`strict=True` ile de) · vertex/index birebir |
 | **Hassasiyet (405 nokta, project → float32 → unproject)** · ölçek hatası | en kötü **0,032 m**, p95 **0,024 m** (sözleşme < 1 m) · **−%4,11 … +%4,81** |
-| Build (81 il) · determinizm · kayıp muhasebesi | 365.481 vertex, 364.057 üçgen, 5.110.782 bayt · iki koşu **0 fark**, `bytes_consumed == len` · `skipped*`/`degenerateTriangles` **0**, `lossy: false` |
+| Build (81 il) · determinizm · kayıp muhasebesi | Ham GeoJSON'daki 712 ring'in kapanış tekrarları çıkarılarak **365.481 TKMS vertex**, 364.057 üçgen, 5.110.782 bayt · iki koşu **0 fark**, `bytes_consumed == len` · `skipped*`/`degenerateTriangles` **0**, `lossy: false` |
 
 **uint16 sınırı:** Muğla 60.478 vertex = sınırın **%92,3'ü**, **5.057 pay**; 81 ilin hepsi sığıyor. Build CLI %80 üstünü uyarıyor — tek tetikleyen Muğla.
 

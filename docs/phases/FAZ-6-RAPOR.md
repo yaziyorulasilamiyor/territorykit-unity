@@ -1,71 +1,52 @@
 # Faz 6 — Sağlamlaştırma ve yayın
 
-Tarih: 2026-08-21 · Durum: Tamamlandı · Dal: feat/phase-6-hardening-release · Commit: 9
+Tarih: 2026-08-21 · Durum: İnceleme düzeltmeleri tamamlandı; F1 manuel Unity kabulü bekliyor ·
+Dal: feat/phase-6-hardening-release · Commit: 14
 
-## Temiz proje doğrulaması gerçek bir hata buldu
-Kullanıcı boş bir Unity 6 projesine paketi UPM git URL'iyle kurup `BasicMap`'i denedi: Unity 6
-varsayılanı "Input System Package (New)", örnek eski `UnityEngine.Input` kullanıyordu — Play'e
-basar basmaz `InvalidOperationException`. Dev proje "Input Manager (Old)" seçili olduğu için hiç
-görünmemişti; klasik "benim makinemde çalışıyor" hatası. Düzeltme: `BasicMapCameraController`
-artık `ENABLE_LEGACY_INPUT_MANAGER`/`ENABLE_INPUT_SYSTEM` koşullu derlemesiyle Old/New/Both'ta
-çalışacak şekilde ayrıldı, bağımlılık eklemeden; ikisi de yoksa tek uyarı loglayıp kontrolü
-kapatıyor, harita yine çiziliyor. Dev proje artık **Both** modunda. Old-only mevcut davranıştı;
-New-only dalı temiz derlendi ama test suit'i çalıştırılmadı; tam 77 EditMode + 49 PlayMode koşusu
-yalnız Both altında geçti. New-only pan/zoom/tıklama davranışını kullanıcı Unity'de doğrulayacak.
+## Son incelemenin sonucu
+Temiz proje testi, Unity 6 New Input System'de eski `UnityEngine.Input` kullanımının Play'de
+fırlattığını buldu. `BasicMapCameraController` artık Old/New/Both koşullu yollarına sahip; hiçbiri
+yoksa tek uyarı verip kendini kapatıyor. New Input scroll'u varsayılan normalize ±1 ile Windows'un
+isteğe bağlı ham ±120 davranışını eşitliyor; kullanıcı bu hissi Unity'de elle doğrulayacak.
 
 ## Ne yapıldı
-- Hata yönetimi: sunucu kapalı/bağlantı kopması testleri (bozuk veri+iptal Faz 4/5'te kanıtlıydı);
-  Input backend hatası aşağıda ayrı bölümde
-- `~110 KB/bölge` çöp tahminini kalemlere ayıran testler: JSON parse, TKMS decode, disk-cache
-  kopyası, mesh upload, URL kurma, `UnityWebRequest` nesne grafiği ayrı ayrı ölçüldü
-- CI'a devre dışı (`if: false`) tam yazılmış `unity-tests` job'ı; manuel komut `CONTRIBUTING.md`'de
-- README yeniden yazıldı: mimari şeması, hızlı başlangıç, doğrulanmış "Alternatifler" bölümü
-- `CHANGELOG.md` sürümlenmiş bölümlere ayrıldı (Faz 4/5 hiç yazılmamıştı); `package.json`
-  `0.1.0`→`0.6.0`
+- Sunucu kapalı ve aktarım sırasında kopma test edildi; bozuk veri ve iptal önceki fazlarda kanıtlı
+- `~110 KB/bölge` geçici tahmin TKMS decode, mesh upload, URL, istek nesnesi, disk kopyası ve
+  viewport JSON kalemlerine ayrıldı
+- Unity CI job'ı `if: false` taslaklandı; hiç çalıştırılmadı ve bu gerçek açıkça kaydedildi
+- README clone→submodule→venv→fetch→LOD→publish→API→Unity tek akışına çevrildi
+- Alternatif iddiaları resmi kaynaklara göre daraltıldı; CHANGELOG düzeltildi, paket `0.6.0` oldu
+- 365.481 ham kapanışsız TKMS vertex ile normalizasyon sonrası kapanışlı 366.157 girdi ayrıştırıldı
 
-## Nasıl doğrulandı
-| Kontrol | Komut | Sonuç |
-|---|---|---|
-| EditMode | `Unity -runTests -testPlatform EditMode` | **77 geçti** |
-| PlayMode | `-testPlatform PlayMode` | **49 geçti** (41 Faz 5 + 2 hata yönetimi + 6 çöp kalemi) |
-
-**Çöp kalemleri** (2.967 vertex / 29.702 bayt TKMS, gerçek bir bölge ölçeği):
-
-| Kalem | Bayt/yineleme |
+## Doğrulama
+| Kontrol | Sonuç |
 |---|---|
-| TKMS decode | **0** (NativeArray tabanlı, tasarımın iddiası doğrulandı) |
-| Mesh.Apply (`SetVertexBufferData`) | **0** (aynı) |
-| URL kurma (`StringBuilder`+`EscapeDataString`) | **156** |
-| `UnityWebRequest.Get` nesne grafiği | **143** |
-| Disk cache için `byte[]` kopyası | **32.768** (yalnız `MeshDiskCache` açıkken, ağ yanıtı başına bir kez) |
-| `/viewport` sayfası JSON parse (50 id) | **1.188** (sayfa başına, bölge başına değil) |
+| Her inceleme commit'i | `ruff check`, `ruff format --check`, `mypy`, **385 pytest geçti** |
+| Temiz sunucu akışı | 81 bölge → `tr-adm1`; `/health` ve `/v1/datasets` başarılı |
+| EditMode/PlayMode | Önceki Both koşusunda **77/49 geçti**; bu incelemede Unity çalıştırılmadı |
+| New-only | Yalnız temiz derlendi; test koşusu ve manuel davranış doğrulaması yapılmadı |
 
-Toplam ~**33 KB** — Faz 5'in ~110 KB tahmininin üçte biri. Kalan fark **ölçülmedi**: Task/async
-ve `UnityWebRequest`'in gönderim yolu gerçek ağ round-trip'i gerektiriyor, bu da ölçümü bozan
-aynı tek-toplama sorununu geri getiriyor.
+**Tahsis ölçümü** (2.967 vertex / 29.702 bayt TKMS): decode **0 B**, mesh upload **0 B**,
+URL **156 B**, `UnityWebRequest.Get` **143 B**, disk kopyası **32.768 B**, 50-id JSON
+**1.188 B**; toplam ~**33 KB**, kalan ~77 KB Task/async ve gerçek ağ yolunda ölçülmedi.
 
-## Draw call batch'leme seçenekleri (V2 öncesi karar, uygulanmadı)
-- **Static/dynamic batching, GPU instancing:** kapalı — bölgeler havuzlanıyor (kalıcı değil),
-  her biri benzersiz mesh. **SRP Batcher:** yalnız CPU maliyetini düşürür, sayıyı değil
-- **Chunk'lanmış `CombineMeshes`** (önerilen ilk adım): bölgeleri N'li gruplarda tek Mesh'e
-  birleştir → draw call `ceil(görünenBölge/N)`'e düşer. Bedel: per-region renk vertex color'a
-  taşınmalı, chunk'lar viewport değişiminde yeniden kurulmalı; CPU picking etkilenmez
-- **Doku-atlas / bölge-id dokusu:** 42.210 mahalle için asıl çözüm, mimari pivotu büyük — V2
+## Kararlar
+1. **Unity tabanı 6000.1** — manifest ve doğrulanmış ortam bu; 2022.3 desteği iddia edilmiyor
+2. **Batching uygulanmadı** — 81 bölgede 83 draw call; chunk `CombineMeshes` V2 seçeneği
+3. **Unity CI devre dışı** — lisans secret'ları olmadan çalıştırılmış gibi gösterilmiyor
 
-## Kararlar ve gerekçeleri
-1. **CI Unity job'ı `if: false`** — üçüncü taraf hesap bilgisi eklemek repo sahibinin kararı
-2. **2022.3 elle doğrulanmadı** — ortamda kurulu değil, README'de niyet olarak işaretli
+## Bilinen sınırlar
+- Disk cache toplam boyut/tahliye sınırı yok; istemci TKMB `entryEncoding: gzip` okumuyor
+- Tekrarlanan cursor koruması yok; gerçek ADM2/ADM3 ve toplam Unity/GPU belleği ölçülmedi
+- 2022.3 doğrulanmadı; Unity CI job'ı hiç çalıştırılmadı
+- `TerritoryMapRenderer` 200+ id'yi tek batch'e gönderip API sınırını aşar; `ViewportStreamer`
+  istekleri 200 benzersiz id'de parçalar
+- Streaming tahsisinin kalan ~77 KB'ı ölçülmedi; upstream sadeleştirme issue'ları açılmadı
 
-## Bilinen eksikler, riskler, tıkanmalar
-- `territorykit-simplification-finding.md`'deki "issue'lar henüz açılmadı" doğrulanmadı
-- Çöpün kalan ~77 KB'lık kısmı ölçülmedi (Task/async, gerçek ağ round-trip'i)
-- Tıkanma yok
+## Kabul ve yayın
+Tek açık kabul F1'dir: kullanıcı New/Old backend zoom hissini Unity'de doğrulayacak. Sonrasında
+`main`e merge, `v0.6.0` tag ve `[Unreleased]` içerikli GitHub Release yapılabilir.
 
-## Sonraki faza hazırlık
-Yok — bu son faz. Onay sonrası: `main`'e `--no-ff` merge, `v0.6.0` tag, GitHub Release
-(`CHANGELOG.md` `[Unreleased]`'den).
-
-## Değişen dosyalar
-- `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `.gitignore`, `.github/workflows/ci.yml`
-- `packages/.../package.json`, `Samples~/BasicMap/*`, `Tests/Common/MockGeometryServer.cs`
-- `Tests/Runtime/*PlayModeTests.cs`, `AllocationBreakdownTests.cs` (yeni), dev proje manifest'i
+## Değişen alanlar
+README/CHANGELOG/faz raporları; Geometry API sözleşmesi; BasicMap input ve örnek kurulum;
+paket sürümü, hata/tahsis testleri ve devre dışı Unity CI taslağı.

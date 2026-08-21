@@ -105,8 +105,10 @@ Faz 6 — sağlamlaştırma ve yayın. `v0.6.0` olarak etiketlenecek.
 - `scripts/repro_territorykit_finding.py`
 
 ### Changed
-- `high` seviyesi 5e-05 toleransla sadeleştiriliyor: 81 il için 365.481 → 240.379 vertex, kayıp
-  sıfır; Muğla uint16 index tavanı %92,3'ten %52,6'ya indi
+- `high` seviyesi 5e-05 toleransla sadeleştiriliyor: normalizasyon sonrası, ring kapanışları
+  dahil 366.157 sadeleştirme girdisi → 240.379 TKMS vertex; sadeleştirme parça/delik düşürmüyor
+  ama normalizasyonun yedi adacık kaybı nedeniyle uçtan uca `lossy: true`; Muğla uint16 index
+  tavanı %92,3'ten %52,6'ya indi
 
 ### Notes
 - Sadeleştirme TerritoryKit'in `--strategy topology-safe` komutuyla **yapılmıyor**: ring'leri
