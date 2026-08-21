@@ -8,9 +8,10 @@ varsayılanı "Input System Package (New)", örnek eski `UnityEngine.Input` kull
 basar basmaz `InvalidOperationException`. Dev proje "Input Manager (Old)" seçili olduğu için hiç
 görünmemişti; klasik "benim makinemde çalışıyor" hatası. Düzeltme: `BasicMapCameraController`
 artık `ENABLE_LEGACY_INPUT_MANAGER`/`ENABLE_INPUT_SYSTEM` koşullu derlemesiyle Old/New/Both'ta
-çalışıyor, bağımlılık eklemeden; ikisi de yoksa tek uyarı loglayıp kontrolü kapatıyor, harita yine
-çiziliyor. Dev proje artık **Both** modunda. Old-only (mevcut), New-only (hatayı doğruladı) ve
-Both altında tam test suit'i ayrı çalıştırıldı, üçü de temiz.
+çalışacak şekilde ayrıldı, bağımlılık eklemeden; ikisi de yoksa tek uyarı loglayıp kontrolü
+kapatıyor, harita yine çiziliyor. Dev proje artık **Both** modunda. Old-only mevcut davranıştı;
+New-only dalı temiz derlendi ama test suit'i çalıştırılmadı; tam 77 EditMode + 49 PlayMode koşusu
+yalnız Both altında geçti. New-only pan/zoom/tıklama davranışını kullanıcı Unity'de doğrulayacak.
 
 ## Ne yapıldı
 - Hata yönetimi: sunucu kapalı/bağlantı kopması testleri (bozuk veri+iptal Faz 4/5'te kanıtlıydı);

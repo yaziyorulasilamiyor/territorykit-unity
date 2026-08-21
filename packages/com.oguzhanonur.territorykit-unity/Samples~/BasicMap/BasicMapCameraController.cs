@@ -210,9 +210,24 @@ namespace TerritoryKit.Unity.Samples.BasicMap
             return Input.mouseScrollDelta.y;
 #elif ENABLE_INPUT_SYSTEM
             Mouse mouse = Mouse.current;
-            // New Input System reports scroll in ~120-unit notches (Windows wheel convention);
-            // legacy reports roughly 1-3 per notch. Scaled down so zoomSpeed feels the same either way.
-            return mouse != null ? mouse.scroll.ReadValue().y / 120f : 0f;
+            if (mouse == null)
+            {
+                return 0f;
+            }
+
+            float scroll = mouse.scroll.ReadValue().y;
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            // Input System's default UniformAcrossAllPlatforms mode already normalizes a wheel
+            // tick to roughly +/-1, matching legacy Input.mouseScrollDelta. Only its opt-in
+            // platform-specific mode exposes Windows' raw +/-120 ticks, so dividing unconditionally
+            // makes the default New-only backend 120x slower.
+            if (InputSystem.settings.scrollDeltaBehavior ==
+                InputSettings.ScrollDeltaBehavior.KeepPlatformSpecificInputRange)
+            {
+                scroll /= 120f;
+            }
+#endif
+            return scroll;
 #else
             return 0f;
 #endif
